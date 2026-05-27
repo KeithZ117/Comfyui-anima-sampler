@@ -28,12 +28,30 @@ Thumbs.db
 tmp/
 temp/
 
+# Local reference material and scratch notes
+user_input/
+docs/anima-corrective-sampling-discussion.md
+docs/idea-log.md
+docs/papers/
+docs/references/
+docs/RF_ODE_Design.md
+docs/advice_about_scheduler.md
+docs/better_pc3.md
+docs/better_pc3_next.md
+docs/cfg_analysis.md
+docs/er_sde_to_flow,md
+docs/flowmatch-euler-implementation-review.md
+docs/rf_flow_matching,analysis.md
+docs/rf_schedules_analysis.md
+tools/
+
 # ComfyUI outputs and local runtime data
 output/
 input/
 temp/
 user/
 web/extensions/*/dist/
+ComfyUI_windows_portable/
 
 # Model weights and generated ML artifacts
 *.safetensors
@@ -55,4 +73,3 @@ web/extensions/*/dist/
 *.mp4
 *.mov
 *.avi
-

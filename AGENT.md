@@ -29,9 +29,30 @@ Use these principles before touching code:
    visible node mapping, sampler parity check, preview output, branch output, or
    masked latent edit. Finish with the checks that were run.
 
+5. No compatibility shims.
+   This project has one test user. When an option, node behavior, or parameter
+   is removed, delete it directly instead of adding aliases, deprecated-name
+   normalization, or backward-compatibility fallbacks. Preserve old behavior
+   only when the user explicitly asks for it.
+
 These principles are adapted from the Karpathy-inspired CLAUDE.md guidance:
 think before coding, keep changes simple, make surgical edits, and verify the
 goal rather than only following imperative steps.
+
+## Experiment Feedback Records
+
+Experimental feedback from actual image-generation runs is first-class project
+data. When the user reports sampler behavior, quality differences, regressions,
+black or gray images, prompt-following changes, detail improvements, or
+preferred settings, record it under `docs/experiment-feedback/`.
+
+Use one dated Markdown file per investigation or feedback batch. Include tested
+settings when known: `flow_solver`, `flow_schedule`, `flow_er_order`,
+`flow_pc3_gamma`, `flow_pc3_tolerance`, stochastic/kick settings, steps, CFG,
+seed, and prompt. If a value was not
+provided, mark it as not provided instead of guessing. Keep observations
+separate from hypotheses so later sampler changes can be traced back to
+user-visible results.
 
 ## Project Facts
 
@@ -71,6 +92,22 @@ The first useful abstraction is phase-aware sampling:
 For high-denoise redraw and img2img, prefer tools that preserve or expose the
 early latent trajectory: segmented sampling, early previews, branch-and-prune,
 and local re-noise.
+
+## RF Naming Rules
+
+ComfyUI's sampler API calls the schedule tensor `sigmas`. Keep that name at the
+ComfyUI boundary, including `sample_custom`, `KSAMPLER`, callback API
+conformance, and native `model_sampling.sigmas` handling.
+
+Inside this project's Rectified Flow solver math, use `t` and `t_next` for
+normalized RF time in `x_t = (1 - t) x0 + t eps`. Do not call RF time `sigma`
+inside solver helpers. Use `lambda_current` / `lambda_next` for
+`log((1 - t) / t)`.
+
+For Cosmos schedule construction, use `external_sigma`, `sigma_ext`, or
+`sigma_ratio` when referring to the noise-to-clean ratio
+`sigma_ext = t / (1 - t)`. Bare `sigma` in new code should only appear when it
+is required by ComfyUI API naming or an existing native sigma table.
 
 ## Non-Goals
 
@@ -133,4 +170,3 @@ represent this project as commercial-ready unless licensing is reviewed.
 
 Do not bypass, disable, or reduce model guardrails. Do not add code that changes
 safety behavior outside the user's explicit, lawful local workflow.
-

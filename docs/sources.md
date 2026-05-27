@@ -34,6 +34,29 @@ Key facts used:
 - Reported GenEval benchmark summary and public limitations.
 - Repository status: archived, with a pointer to Cosmos-Predict2.5.
 
+## Cosmos-Predict2.5
+
+- User-provided technical report PDF:
+  `user_input/2511.00062v2.pdf`
+- arXiv abstract page:
+  https://arxiv.org/abs/2511.00062
+- NVIDIA Cosmos-Predict2.5 repository:
+  https://github.com/nvidia-cosmos/cosmos-predict2.5
+
+Key facts used:
+
+- Cosmos-Predict2.5 is described as a flow-matching model.
+- The report defines the latent path as
+  `x_t = (1 - t) x + t eps` and the velocity target as `v_t = eps - x`.
+- Training timesteps are sampled from a logit-normal distribution.
+- The report applies the shift
+  `t_s = beta * t / (1 + (beta - 1) * t)`, with beta increasing from `1` at
+  256p to `5` at 720p.
+- The report states that 5% of training samples are explicitly drawn from the
+  highest 2% of the noise distribution to reduce transition artifacts.
+- The Predict2 scheduler code uses a rectified-flow rho/order schedule with
+  `sigma_min=0.002`, `sigma_max=80.0`, and `order=7.0`.
+
 ## Karpathy-Inspired Agent Guidance
 
 - Karpathy-inspired Claude Code guidelines repository:
@@ -45,4 +68,3 @@ Key ideas used:
 - Simplicity first.
 - Surgical changes.
 - Goal-driven execution with verification.
-
