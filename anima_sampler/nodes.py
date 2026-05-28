@@ -330,11 +330,12 @@ class AnimaFlowCorrectiveSampler:
             },
             "optional": {
                 "flow_settings": (ANIMA_FLOW_SETTINGS,),
+                "vae": ("VAE",),
             },
         }
 
-    RETURN_TYPES = ("LATENT", "STRING")
-    RETURN_NAMES = ("latent", "log")
+    RETURN_TYPES = ("LATENT", "IMAGE", "STRING")
+    RETURN_NAMES = ("latent", "image", "log")
     FUNCTION = "sample"
     CATEGORY = "Anima/Error Corrective Sampling"
 
@@ -354,6 +355,7 @@ class AnimaFlowCorrectiveSampler:
         denoise,
         add_noise,
         flow_settings=None,
+        vae=None,
     ):
         base_params = _normalize_settings_object(flow_settings)
         params = _normalize_flow_params(
@@ -368,7 +370,7 @@ class AnimaFlowCorrectiveSampler:
             }
         )
         params = _apply_public_cfg_mode(params, cfg_mode)
-        return _run_sampler_with_params(
+        latent_out, log = _run_sampler_with_params(
             model=model,
             positive=positive,
             negative=negative,
@@ -378,6 +380,12 @@ class AnimaFlowCorrectiveSampler:
             add_noise=add_noise,
             disable_pbar=False,
         )
+        image = _decode_latent_image(vae, latent_out)
+        if vae is None:
+            log = f"{log}\nimage_output: unavailable (connect VAE)"
+        else:
+            log = f"{log}\nimage_output: decoded with connected VAE"
+        return latent_out, image, log
 
 
 def _run_sampler_with_params(
@@ -456,6 +464,23 @@ def _normalize_settings_object(flow_settings) -> dict:
         if key in ANIMA_FLOW_BASELINE:
             out[key] = value
     return _normalize_flow_params(out)
+
+
+def _decode_latent_image(vae, latent: dict):
+    if vae is None:
+        return None
+    if "samples" not in latent:
+        raise ValueError("latent output must contain a 'samples' tensor")
+
+    samples = latent["samples"]
+    ndim = int(getattr(samples, "ndim", len(samples.shape)))
+    if ndim == 5:
+        if int(samples.shape[2]) != 1:
+            raise ValueError("VAE image output requires a single-frame latent")
+        samples = samples.squeeze(2)
+    elif ndim != 4:
+        raise ValueError("VAE image output requires a 4D image latent")
+    return vae.decode(samples)
 
 
 def _apply_public_cfg_mode(params: dict, cfg_mode: str) -> dict:

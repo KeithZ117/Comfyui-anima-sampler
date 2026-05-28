@@ -1,4 +1,7 @@
 import unittest
+from unittest.mock import patch
+
+import torch
 
 from anima_sampler.nodes import (
     ANIMA_FLOW_BASELINE,
@@ -9,6 +12,7 @@ from anima_sampler.nodes import (
     NODE_DISPLAY_NAME_MAPPINGS,
     PUBLIC_CFG_MODES,
     _apply_public_cfg_mode,
+    _decode_latent_image,
     _normalize_settings_object,
 )
 
@@ -60,7 +64,11 @@ class NodeRegistrationTests(unittest.TestCase):
         self.assertIn("add_noise", required)
         self.assertNotIn("disable_pbar", required)
         self.assertEqual(optional["flow_settings"][0], ANIMA_FLOW_SETTINGS)
+        self.assertEqual(optional["vae"][0], "VAE")
         self.assertNotIn("flow_settings", required)
+        self.assertNotIn("vae", required)
+        self.assertEqual(AnimaFlowCorrectiveSampler.RETURN_TYPES, ("LATENT", "IMAGE", "STRING"))
+        self.assertEqual(AnimaFlowCorrectiveSampler.RETURN_NAMES, ("latent", "image", "log"))
 
         hidden_controls = {
             "flow_er_order",
@@ -175,6 +183,65 @@ class NodeRegistrationTests(unittest.TestCase):
         self.assertEqual(const["cfg_peak_boost"], 0.0)
         self.assertEqual(const["cfg_early_scale"], 1.0)
         self.assertEqual(const["late_cfg_scale"], 1.0)
+
+    def test_decode_latent_image_is_optional_and_decodes_4d_latent(self):
+        samples = torch.zeros(1, 16, 8, 8)
+        latent = {"samples": samples}
+        vae = _DummyVAE()
+
+        self.assertIsNone(_decode_latent_image(None, latent))
+        image = _decode_latent_image(vae, latent)
+
+        self.assertIs(image, vae.image)
+        self.assertIs(vae.samples, samples)
+
+    def test_decode_latent_image_squeezes_single_frame_cosmos_latent(self):
+        samples = torch.zeros(1, 16, 1, 8, 8)
+        vae = _DummyVAE()
+
+        _decode_latent_image(vae, {"samples": samples})
+
+        self.assertEqual(tuple(vae.samples.shape), (1, 16, 8, 8))
+
+    def test_decode_latent_image_rejects_multi_frame_latent(self):
+        with self.assertRaisesRegex(ValueError, "single-frame"):
+            _decode_latent_image(_DummyVAE(), {"samples": torch.zeros(1, 16, 2, 8, 8)})
+
+    def test_sampler_returns_latent_image_and_log_when_vae_is_connected(self):
+        latent = {"samples": torch.zeros(1, 16, 8, 8)}
+        vae = _DummyVAE()
+
+        with patch("anima_sampler.nodes._run_sampler_with_params", return_value=(latent, "log")):
+            latent_out, image, log = AnimaFlowCorrectiveSampler().sample(
+                model=object(),
+                positive=[],
+                negative=[],
+                latent_image=latent,
+                seed=1,
+                steps=35,
+                cfg=6.0,
+                cfg_mode="bump cfg",
+                flow_solver="flow_pc3_damped",
+                flow_schedule="flow_cosmos",
+                flow_shift=5.0,
+                denoise=1.0,
+                add_noise=True,
+                vae=vae,
+            )
+
+        self.assertIs(latent_out, latent)
+        self.assertIs(image, vae.image)
+        self.assertIn("image_output: decoded", log)
+
+
+class _DummyVAE:
+    def __init__(self):
+        self.samples = None
+        self.image = torch.zeros(1, 8, 8, 3)
+
+    def decode(self, samples):
+        self.samples = samples
+        return self.image
 
 
 if __name__ == "__main__":

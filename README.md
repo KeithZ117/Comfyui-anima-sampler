@@ -24,6 +24,10 @@ The sampler works without connecting `Anima Flow Settings`; the tested defaults
 are built in. Connect the settings node only when you want to tune advanced
 parameters.
 
+The sampler outputs both `LATENT` and `IMAGE`. Connect a `VAE` to the optional
+`vae` input when you want the image output decoded directly from the sampler.
+Leave `vae` disconnected when you only need the latent output.
+
 ## Install
 
 Clone or copy this repository into ComfyUI's `custom_nodes` directory:
@@ -53,6 +57,7 @@ Everyday controls:
 - `flow_shift`: default `5.0`
 - `denoise`
 - `add_noise`
+- optional `vae` for direct image output
 
 `flow_shift` affects `flow_cosmos`. Set it to `1.0` for no extra shift. The
 `flow_cosmos_rho7_rf_tail_auto` schedule ignores `flow_shift` by design.
