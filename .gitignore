@@ -30,6 +30,7 @@ temp/
 
 # Local reference material and scratch notes
 user_input/
+docs/
 docs/anima-corrective-sampling-discussion.md
 docs/idea-log.md
 docs/papers/
