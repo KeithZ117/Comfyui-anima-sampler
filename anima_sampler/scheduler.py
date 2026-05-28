@@ -133,6 +133,55 @@ def build_flow_cosmos_beta_sigmas(
     ] + [0.0]
 
 
+def build_flow_cosmos_shift_rf_tail_sigmas(
+    steps: int,
+    *,
+    beta: float,
+    tail_delta_ell_max: float = 0.5,
+    sigma_max: float = 80.0,
+    sigma_min: float = 0.002,
+    sigma_start: float | None = None,
+) -> list[float]:
+    """Build a beta-shifted high/mid schedule with an RF-native tail.
+
+    Full beta shift multiplies both endpoints, so ``beta=5`` ends at
+    ``sigma_min * 5`` and leaves a larger terminal cleanup jump. This schedule
+    isolates the interesting high-noise shift by keeping the shifted prefix,
+    then switching to a uniform ``ell = -log(t)`` tail that returns to the
+    original low-noise endpoint.
+    """
+
+    _validate_steps(steps)
+    if beta <= 0.0:
+        raise ValueError("beta must be positive")
+    if tail_delta_ell_max <= 0.0:
+        raise ValueError("tail_delta_ell_max must be positive")
+    if not (0.0 < sigma_min < sigma_max):
+        raise ValueError("expected 0 < sigma_min < sigma_max")
+
+    shifted_sigma_max = sigma_max * beta
+    actual_sigma_start = shifted_sigma_max if sigma_start is None else float(sigma_start)
+    if actual_sigma_start <= sigma_min:
+        raise ValueError("expected sigma_start > sigma_min")
+
+    shifted_sigma_min = sigma_min * beta
+    if steps < 3 or actual_sigma_start <= shifted_sigma_min:
+        external_sigmas = _logspace(actual_sigma_start, sigma_min, steps)
+    else:
+        reference_shifted = _logspace(actual_sigma_start, shifted_sigma_min, steps)
+        external_sigmas = _rho_with_auto_ell_tail(
+            reference_shifted,
+            sigma_min=sigma_min,
+            max_delta_ell=float(tail_delta_ell_max),
+        )
+
+    time_sigma_max = max(actual_sigma_start, shifted_sigma_max)
+    return [
+        _cosmos_rflow_time(sigma, sigma_max=time_sigma_max)
+        for sigma in external_sigmas
+    ] + [0.0]
+
+
 def build_flow_cosmos_lambda_biased_sigmas(
     steps: int,
     *,

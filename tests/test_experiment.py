@@ -23,7 +23,9 @@ class ExperimentHelperTests(unittest.TestCase):
     def test_cosmos_sigma_values_are_sweepable(self):
         self.assertIn("cosmos_sigma_max", PARAMETER_SWEEP_KEYS)
         self.assertIn("cosmos_sigma_min", PARAMETER_SWEEP_KEYS)
+        self.assertIn("flow_shift", PARAMETER_SWEEP_KEYS)
         self.assertEqual(parse_sweep_values("40, 80", "cosmos_sigma_max", max_runs=8), [40.0, 80.0])
+        self.assertEqual(parse_sweep_values("2, 3, 5", "flow_shift", max_runs=8), [2.0, 3.0, 5.0])
 
     def test_cfg_legacy_progress_is_sweepable_bool(self):
         self.assertIn("cfg_legacy_progress", PARAMETER_SWEEP_KEYS)
@@ -150,7 +152,7 @@ class ExperimentHelperTests(unittest.TestCase):
             parse_sweep_values(
                 (
                     "flow_cosmos, flow_cosmos_lambda_biased_strong, "
-                    "flow_cosmos_beta5, flow_cosmos_rho7_rf_tail_auto, simple"
+                    "flow_cosmos_rho7_rf_tail_auto, simple"
                 ),
                 "flow_schedule",
                 max_runs=12,
@@ -158,7 +160,6 @@ class ExperimentHelperTests(unittest.TestCase):
             [
                 "flow_cosmos",
                 "flow_cosmos_lambda_biased_strong",
-                "flow_cosmos_beta5",
                 "flow_cosmos_rho7_rf_tail_auto",
                 "simple",
             ],
@@ -171,6 +172,10 @@ class ExperimentHelperTests(unittest.TestCase):
             parse_sweep_values("flow_cosmos_rho7", "flow_schedule", max_runs=8)
         with self.assertRaises(ValueError):
             parse_sweep_values("flow_cosmos_rho7_rf_tail_balanced", "flow_schedule", max_runs=8)
+        with self.assertRaises(ValueError):
+            parse_sweep_values("flow_cosmos_beta5", "flow_schedule", max_runs=8)
+        with self.assertRaises(ValueError):
+            parse_sweep_values("flow_cosmos_shift5_rf_tail_auto", "flow_schedule", max_runs=8)
 
     def test_enum_sweep_rejects_unknown_values(self):
         with self.assertRaises(ValueError):

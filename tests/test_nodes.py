@@ -1,190 +1,71 @@
 import unittest
 
 from anima_sampler.nodes import (
-    AnimaFlowSettings,
-    AnimaFlowMatrixSweep,
-    AnimaFlowParameterSweep,
+    ANIMA_FLOW_BASELINE,
+    ANIMA_FLOW_SETTINGS,
     AnimaFlowCorrectiveSampler,
-    AnimaFlowTestPrompt,
+    AnimaFlowSettings,
     NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS,
-    _estimated_model_calls,
+    PUBLIC_CFG_MODES,
+    _apply_public_cfg_mode,
     _normalize_settings_object,
 )
-from anima_sampler.flow_sampler import CFG_SCHEDULE_MODES
 
 
 class NodeRegistrationTests(unittest.TestCase):
-    def test_anima_sampler_node_is_registered(self):
-        self.assertIn("AnimaFlowCorrectiveSampler", NODE_CLASS_MAPPINGS)
+    def test_release_nodes_are_registered(self):
         self.assertEqual(
-            NODE_DISPLAY_NAME_MAPPINGS["AnimaFlowCorrectiveSampler"],
-            "Anima Flow Corrective Sampler",
-        )
-
-    def test_only_flow_sampler_node_is_registered(self):
-        self.assertEqual(
-            set(NODE_CLASS_MAPPINGS),
+            NODE_CLASS_MAPPINGS,
             {
-                "AnimaFlowSettings",
-                "AnimaFlowCorrectiveSampler",
-                "AnimaFlowParameterSweep",
-                "AnimaFlowMatrixSweep",
-                "AnimaFlowTestPrompt",
+                "AnimaFlowSettings": AnimaFlowSettings,
+                "AnimaFlowCorrectiveSampler": AnimaFlowCorrectiveSampler,
+            },
+        )
+        self.assertEqual(
+            NODE_DISPLAY_NAME_MAPPINGS,
+            {
+                "AnimaFlowSettings": "Anima Flow Settings",
+                "AnimaFlowCorrectiveSampler": "Anima Flow Corrective Sampler",
             },
         )
 
-    def test_flow_settings_node_is_registered(self):
-        self.assertIn("AnimaFlowSettings", NODE_CLASS_MAPPINGS)
-        self.assertEqual(
-            NODE_DISPLAY_NAME_MAPPINGS["AnimaFlowSettings"],
-            "Anima Flow Settings",
-        )
+    def test_experiment_nodes_are_not_registered(self):
+        removed_nodes = {
+            "AnimaFlowParameterSweep",
+            "AnimaFlowMatrixSweep",
+            "AnimaFlowThreeRoundRho7Test",
+            "AnimaFlowCFGWindowTest",
+            "AnimaFlowShiftRecoveryTest",
+            "AnimaFlowTestPrompt",
+        }
 
-    def test_flow_settings_defaults_match_experimental_baseline(self):
-        inputs = AnimaFlowSettings.INPUT_TYPES()["required"]
-        self.assertEqual(inputs["steps"][1]["default"], 35)
-        self.assertEqual(inputs["cfg"][1]["default"], 6.0)
-        self.assertEqual(
-            inputs["flow_solver"][0],
-            [
-                "flow_euler",
-                "flow_heun",
-                "flow_pc3_damped",
-                "flow_pc3_fsal_gated",
-                "flow_3m_damped",
-                "flow_3m_sparse_pc3_fsal",
-                "flow_er",
-            ],
-        )
-        self.assertEqual(inputs["flow_solver"][1]["default"], "flow_pc3_damped")
-        self.assertEqual(inputs["flow_er_order"][1]["default"], 2)
-        self.assertEqual(inputs["flow_pc3_gamma"][1]["default"], 1.0)
-        self.assertEqual(inputs["flow_pc3_tolerance"][1]["default"], 0.005)
-        self.assertEqual(
-            inputs["flow_schedule"][0],
-            [
-                "flow_cosmos",
-                "flow_cosmos_lambda_biased_strong",
-                "flow_cosmos_beta5",
-                "flow_cosmos_rho7_rf_tail_auto",
-                "simple",
-            ],
-        )
-        self.assertEqual(inputs["flow_schedule"][1]["default"], "flow_cosmos")
-        self.assertEqual(inputs["cosmos_sigma_max"][1]["default"], 80.0)
-        self.assertEqual(inputs["cosmos_sigma_min"][1]["default"], 0.002)
-        self.assertEqual(inputs["cfg_legacy_progress"][0], "BOOLEAN")
-        self.assertFalse(inputs["cfg_legacy_progress"][1]["default"])
-        self.assertEqual(inputs["cfg_schedule_mode"][0], CFG_SCHEDULE_MODES)
-        self.assertEqual(inputs["cfg_schedule_mode"][1]["default"], "beta_bump")
-        self.assertEqual(inputs["denoise_legacy_progress"][0], "BOOLEAN")
-        self.assertFalse(inputs["denoise_legacy_progress"][1]["default"])
-        self.assertEqual(inputs["cfg_early_scale"][1]["default"], 0.98)
-        self.assertEqual(inputs["cfg_early_ramp_end"][1]["default"], 0.10)
-        self.assertEqual(inputs["cfg_peak_boost"][1]["default"], 0.60)
-        self.assertEqual(inputs["cfg_bump_start"][1]["default"], 0.08)
-        self.assertEqual(inputs["cfg_bump_end"][1]["default"], 0.68)
-        self.assertEqual(inputs["cfg_beta_alpha"][1]["default"], 4.0)
-        self.assertEqual(inputs["cfg_beta_beta"][1]["default"], 7.0)
-        self.assertEqual(inputs["cfg_interval_start"][1]["default"], 0.12)
-        self.assertEqual(inputs["cfg_interval_rise_end"][1]["default"], 0.24)
-        self.assertEqual(inputs["cfg_interval_fall_start"][1]["default"], 0.36)
-        self.assertEqual(inputs["cfg_interval_end"][1]["default"], 0.58)
-        self.assertEqual(inputs["early_cfg_boost"][1]["default"], 0.5)
-        self.assertEqual(inputs["early_cfg_until"][1]["default"], 0.30)
-        self.assertEqual(inputs["late_cfg_scale"][1]["default"], 0.92)
-        self.assertEqual(inputs["late_cfg_start"][1]["default"], 0.76)
-        self.assertFalse(inputs["rf_endpoint_noise_refresh_enabled"][1]["default"])
-        self.assertEqual(inputs["rf_endpoint_noise_refresh_strength"][1]["default"], 0.15)
-        self.assertEqual(inputs["rf_endpoint_noise_refresh_until"][1]["default"], 0.20)
+        self.assertTrue(removed_nodes.isdisjoint(NODE_CLASS_MAPPINGS))
+        self.assertTrue(removed_nodes.isdisjoint(NODE_DISPLAY_NAME_MAPPINGS))
 
-    def test_flow_settings_builds_connection_object(self):
-        settings, summary = AnimaFlowSettings().build(
-            steps=35,
-            cfg=6.0,
-            flow_solver="flow_euler",
-            flow_er_order=2,
-            flow_pc3_gamma=1.0,
-            flow_pc3_tolerance=0.005,
-            flow_schedule="flow_cosmos",
-            cosmos_sigma_max=80.0,
-            cosmos_sigma_min=0.002,
-            denoise_legacy_progress=False,
-            cfg_legacy_progress=False,
-            cfg_schedule_mode="beta_bump",
-            cfg_early_scale=0.98,
-            cfg_early_ramp_end=0.10,
-            cfg_peak_boost=0.60,
-            cfg_bump_start=0.08,
-            cfg_bump_end=0.68,
-            cfg_beta_alpha=4.0,
-            cfg_beta_beta=7.0,
-            cfg_interval_start=0.12,
-            cfg_interval_rise_end=0.24,
-            cfg_interval_fall_start=0.36,
-            cfg_interval_end=0.58,
-            early_cfg_boost=0.5,
-            early_cfg_until=0.30,
-            late_cfg_scale=0.92,
-            late_cfg_start=0.76,
-            rf_endpoint_noise_refresh_enabled=False,
-            rf_endpoint_noise_refresh_strength=0.15,
-            rf_endpoint_noise_refresh_until=0.20,
-        )
+    def test_sampler_exposes_daily_controls_and_optional_settings(self):
+        input_types = AnimaFlowCorrectiveSampler.INPUT_TYPES()
+        required = input_types["required"]
+        optional = input_types["optional"]
 
-        self.assertEqual(settings["cfg"], 6.0)
-        self.assertEqual(settings["flow_er_order"], 2)
-        self.assertEqual(settings["flow_pc3_gamma"], 1.0)
-        self.assertEqual(settings["flow_pc3_tolerance"], 0.005)
-        self.assertEqual(settings["flow_schedule"], "flow_cosmos")
-        self.assertFalse(settings["denoise_legacy_progress"])
-        self.assertFalse(settings["cfg_legacy_progress"])
-        self.assertEqual(settings["cfg_schedule_mode"], "beta_bump")
-        self.assertEqual(settings["cfg_peak_boost"], 0.60)
-        self.assertEqual(settings["cfg_bump_start"], 0.08)
-        self.assertEqual(settings["cfg_bump_end"], 0.68)
-        self.assertFalse(settings["rf_endpoint_noise_refresh_enabled"])
-        self.assertEqual(settings["rf_endpoint_noise_refresh_strength"], 0.15)
-        self.assertEqual(settings["rf_endpoint_noise_refresh_until"], 0.20)
-        self.assertIn("AnimaFlowSettings", summary)
-        self.assertIn("steps_semantics: RF integration intervals", summary)
-        self.assertIn("estimated_model_calls: 35", summary)
-        self.assertIn("cfg_schedule_mode: beta_bump", summary)
-        self.assertIn("cfg_peak_boost: 0.6000", summary)
+        self.assertEqual(required["steps"][1]["default"], 35)
+        self.assertEqual(required["cfg"][1]["default"], 6.0)
+        self.assertEqual(required["cfg_mode"][0], PUBLIC_CFG_MODES)
+        self.assertEqual(required["cfg_mode"][1]["default"], "bump cfg")
+        self.assertEqual(required["flow_solver"][1]["default"], "flow_pc3_damped")
+        self.assertEqual(required["flow_schedule"][1]["default"], "flow_cosmos")
+        self.assertEqual(required["flow_shift"][1]["default"], 5.0)
+        self.assertIn("seed", required)
+        self.assertIn("denoise", required)
+        self.assertIn("add_noise", required)
+        self.assertNotIn("disable_pbar", required)
+        self.assertEqual(optional["flow_settings"][0], ANIMA_FLOW_SETTINGS)
+        self.assertNotIn("flow_settings", required)
 
-    def test_estimated_model_calls_covers_new_solver_costs(self):
-        self.assertEqual(_estimated_model_calls({"steps": 35, "flow_solver": "flow_heun"}), 69)
-        self.assertEqual(_estimated_model_calls({"steps": 35, "flow_solver": "flow_pc3_damped"}), 69)
-        self.assertEqual(_estimated_model_calls({"steps": 35, "flow_solver": "flow_pc3_fsal_gated"}), 69)
-        self.assertEqual(_estimated_model_calls({"steps": 35, "flow_solver": "flow_3m_sparse_pc3_fsal"}), 43)
-        self.assertEqual(_estimated_model_calls({"steps": 35, "flow_solver": "flow_3m_damped"}), 35)
-
-    def test_missing_settings_fields_use_current_baseline_defaults(self):
-        settings = _normalize_settings_object({"steps": 24})
-
-        self.assertEqual(settings["steps"], 24)
-        self.assertEqual(settings["cfg_schedule_mode"], "beta_bump")
-        self.assertFalse(settings["cfg_legacy_progress"])
-
-    def test_flow_sampler_requires_settings_and_keeps_runtime_controls(self):
-        inputs = AnimaFlowCorrectiveSampler.INPUT_TYPES()["required"]
-        self.assertEqual(inputs["flow_settings"][0], "ANIMA_FLOW_SETTINGS")
-        self.assertIn("seed", inputs)
-        self.assertIn("denoise", inputs)
-        self.assertIn("add_noise", inputs)
-        self.assertIn("disable_pbar", inputs)
-
-    def test_flow_sampler_hides_algorithm_controls(self):
-        inputs = AnimaFlowCorrectiveSampler.INPUT_TYPES()["required"]
         hidden_controls = {
-            "steps",
-            "cfg",
-            "flow_solver",
             "flow_er_order",
             "flow_pc3_gamma",
             "flow_pc3_tolerance",
-            "flow_schedule",
             "cosmos_sigma_max",
             "cosmos_sigma_min",
             "denoise_legacy_progress",
@@ -197,130 +78,103 @@ class NodeRegistrationTests(unittest.TestCase):
             "cfg_bump_end",
             "cfg_beta_alpha",
             "cfg_beta_beta",
-            "cfg_interval_start",
-            "cfg_interval_rise_end",
-            "cfg_interval_fall_start",
-            "cfg_interval_end",
-            "early_cfg_boost",
-            "early_cfg_until",
             "late_cfg_scale",
             "late_cfg_start",
             "rf_endpoint_noise_refresh_enabled",
             "rf_endpoint_noise_refresh_strength",
             "rf_endpoint_noise_refresh_until",
         }
-        self.assertTrue(hidden_controls.isdisjoint(inputs))
+        self.assertTrue(hidden_controls.isdisjoint(required))
 
-    def test_parameter_sweep_node_is_registered(self):
-        self.assertIn("AnimaFlowParameterSweep", NODE_CLASS_MAPPINGS)
-        self.assertEqual(
-            NODE_DISPLAY_NAME_MAPPINGS["AnimaFlowParameterSweep"],
-            "Anima Flow Parameter Sweep",
-        )
+    def test_settings_exposes_advanced_controls_without_sampler_overrides(self):
+        inputs = AnimaFlowSettings.INPUT_TYPES()["required"]
 
-    def test_parameter_sweep_exposes_grid_controls(self):
-        inputs = AnimaFlowParameterSweep.INPUT_TYPES()["required"]
-        self.assertEqual(inputs["flow_settings"][0], "ANIMA_FLOW_SETTINGS")
-        self.assertIn("vae", inputs)
-        self.assertIn("sweep_parameter", inputs)
-        self.assertEqual(inputs["sweep_parameter"][1]["default"], "flow_schedule")
-        self.assertIn("sweep_values", inputs)
-        self.assertIn("flow_cosmos_lambda_biased_strong", inputs["sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos,", inputs["sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_lambda_biased_light", inputs["sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_lambda_biased,", inputs["sweep_values"][1]["default"])
-        self.assertIn("flow_cosmos_rho7_rf_tail_auto", inputs["sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_rho7,", inputs["sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_rho7_rf_tail_balanced", inputs["sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_rho7_rf_tail_early", inputs["sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_rho7_rf_tail_late", inputs["sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_rho7_rf_tail_dynamic", inputs["sweep_values"][1]["default"])
-        self.assertNotIn("flowmatch_euler", inputs["sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_beta5", inputs["sweep_values"][1]["default"])
-        self.assertIn("columns", inputs)
-        self.assertEqual(inputs["columns"][1]["default"], 3)
-        self.assertEqual(inputs["max_runs"][1]["default"], 2)
-
-    def test_parameter_sweep_hides_algorithm_controls(self):
-        inputs = AnimaFlowParameterSweep.INPUT_TYPES()["required"]
         self.assertNotIn("steps", inputs)
         self.assertNotIn("cfg", inputs)
-        self.assertNotIn("cosmos_sigma_max", inputs)
-        self.assertNotIn("cosmos_sigma_min", inputs)
+        self.assertNotIn("flow_solver", inputs)
+        self.assertNotIn("flow_schedule", inputs)
+        self.assertNotIn("flow_shift", inputs)
         self.assertNotIn("cfg_schedule_mode", inputs)
-        self.assertNotIn("cfg_peak_boost", inputs)
-        self.assertNotIn("rf_endpoint_noise_refresh_enabled", inputs)
-        self.assertNotIn("rf_endpoint_noise_refresh_strength", inputs)
-        self.assertNotIn("rf_endpoint_noise_refresh_until", inputs)
+        self.assertEqual(inputs["cfg_bump_start"][1]["default"], 0.0)
+        self.assertEqual(inputs["cfg_bump_end"][1]["default"], 0.27)
+        self.assertFalse(inputs["cfg_legacy_progress"][1]["default"])
+        self.assertFalse(inputs["denoise_legacy_progress"][1]["default"])
 
-    def test_matrix_sweep_node_is_registered(self):
-        self.assertIn("AnimaFlowMatrixSweep", NODE_CLASS_MAPPINGS)
-        self.assertEqual(
-            NODE_DISPLAY_NAME_MAPPINGS["AnimaFlowMatrixSweep"],
-            "Anima Flow Matrix Sweep",
+    def test_settings_builds_optional_connection_object(self):
+        settings, summary = AnimaFlowSettings().build(
+            flow_er_order=2,
+            flow_pc3_gamma=0.75,
+            flow_pc3_tolerance=0.008,
+            cfg_early_scale=1.0,
+            cfg_early_ramp_end=0.0,
+            cfg_peak_boost=0.60,
+            cfg_bump_start=0.0,
+            cfg_bump_end=0.27,
+            cfg_beta_alpha=2.0,
+            cfg_beta_beta=3.0,
+            late_cfg_scale=1.0,
+            late_cfg_start=0.76,
+            cfg_legacy_progress=False,
+            denoise_legacy_progress=False,
+            cosmos_sigma_max=80.0,
+            cosmos_sigma_min=0.002,
+            rf_endpoint_noise_refresh_enabled=False,
+            rf_endpoint_noise_refresh_strength=0.15,
+            rf_endpoint_noise_refresh_until=0.20,
         )
 
-    def test_matrix_sweep_defaults_to_schedule_by_solver(self):
-        inputs = AnimaFlowMatrixSweep.INPUT_TYPES()["required"]
-        self.assertEqual(inputs["flow_settings"][0], "ANIMA_FLOW_SETTINGS")
-        self.assertIn("vae", inputs)
-        self.assertEqual(inputs["primary_sweep_parameter"][1]["default"], "flow_schedule")
-        self.assertIn("flow_cosmos_lambda_biased_strong", inputs["primary_sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos,", inputs["primary_sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_lambda_biased_light", inputs["primary_sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_lambda_biased,", inputs["primary_sweep_values"][1]["default"])
-        self.assertIn("flow_cosmos_rho7_rf_tail_auto", inputs["primary_sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_rho7,", inputs["primary_sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_rho7_rf_tail_balanced", inputs["primary_sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_rho7_rf_tail_early", inputs["primary_sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_rho7_rf_tail_late", inputs["primary_sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_rho7_rf_tail_dynamic", inputs["primary_sweep_values"][1]["default"])
-        self.assertNotIn("flowmatch_euler", inputs["primary_sweep_values"][1]["default"])
-        self.assertNotIn("flow_cosmos_beta5", inputs["primary_sweep_values"][1]["default"])
-        self.assertEqual(inputs["secondary_sweep_parameter"][1]["default"], "flow_solver")
-        self.assertIn("flow_pc3_fsal_gated", inputs["secondary_sweep_values"][1]["default"])
-        self.assertIn("flow_3m_damped", inputs["secondary_sweep_values"][1]["default"])
-        self.assertIn("flow_3m_sparse_pc3_fsal", inputs["secondary_sweep_values"][1]["default"])
-        self.assertIn("flow_heun", inputs["secondary_sweep_values"][1]["default"])
-        self.assertNotIn("flow_er", inputs["secondary_sweep_values"][1]["default"])
-        self.assertNotIn("flow_rho7_euler", inputs["secondary_sweep_values"][1]["default"])
-        self.assertFalse(inputs["include_comfy_er_sde_simple"][1]["default"])
-        self.assertEqual(inputs["columns"][1]["default"], 5)
-        self.assertEqual(inputs["max_runs"][1]["default"], 10)
+        self.assertEqual(settings["steps"], ANIMA_FLOW_BASELINE["steps"])
+        self.assertEqual(settings["cfg"], ANIMA_FLOW_BASELINE["cfg"])
+        self.assertEqual(settings["flow_solver"], ANIMA_FLOW_BASELINE["flow_solver"])
+        self.assertEqual(settings["flow_schedule"], "flow_cosmos")
+        self.assertEqual(settings["flow_shift"], 5.0)
+        self.assertEqual(settings["flow_pc3_gamma"], 0.75)
+        self.assertEqual(settings["flow_pc3_tolerance"], 0.008)
+        self.assertIn("optional advanced settings", summary)
+        self.assertIn("flow_pc3_gamma: 0.7500", summary)
+        self.assertIn("sampler_default_flow_shift: 5.0000", summary)
+        self.assertNotIn("\nflow_shift:", summary)
 
-    def test_matrix_sweep_hides_algorithm_controls(self):
-        inputs = AnimaFlowMatrixSweep.INPUT_TYPES()["required"]
-        self.assertNotIn("steps", inputs)
-        self.assertNotIn("cfg", inputs)
-        self.assertNotIn("cosmos_sigma_max", inputs)
-        self.assertNotIn("cosmos_sigma_min", inputs)
-        self.assertNotIn("cfg_schedule_mode", inputs)
-        self.assertNotIn("cfg_peak_boost", inputs)
-        self.assertNotIn("rf_endpoint_noise_refresh_enabled", inputs)
+    def test_none_settings_use_rc2_baseline(self):
+        settings = _normalize_settings_object(None)
 
-    def test_test_prompt_node_outputs_multi_character_stress_prompt(self):
-        self.assertIn("AnimaFlowTestPrompt", NODE_CLASS_MAPPINGS)
-        self.assertEqual(
-            NODE_DISPLAY_NAME_MAPPINGS["AnimaFlowTestPrompt"],
-            "Anima Flow Test Prompt",
-        )
+        self.assertEqual(settings["steps"], 35)
+        self.assertEqual(settings["cfg"], 6.0)
+        self.assertEqual(settings["flow_solver"], "flow_pc3_damped")
+        self.assertEqual(settings["flow_schedule"], "flow_cosmos")
+        self.assertEqual(settings["flow_shift"], 5.0)
+        self.assertFalse(settings["cfg_legacy_progress"])
 
-        inputs = AnimaFlowTestPrompt.INPUT_TYPES()["required"]
-        self.assertEqual(
-            inputs["prompt_case"][1]["default"],
-            "yuruyuri_4girls_dynamic_festival",
-        )
+    def test_connected_settings_merge_with_baseline(self):
+        settings = _normalize_settings_object({"flow_pc3_tolerance": 0.01})
 
-        positive, negative = AnimaFlowTestPrompt().build("yuruyuri_4girls_dynamic_festival")
-        self.assertIn("official art", positive)
-        self.assertIn("yuru yuri", positive)
-        self.assertIn("4girls", positive)
-        self.assertIn("huge bouquet", positive)
-        self.assertIn("chromatic aberration", positive)
-        self.assertIn("depth of field", positive)
-        self.assertIn("Kyouko leaping backward", positive)
-        self.assertIn("Yui catching the oversized bouquet", positive)
-        self.assertIn("wrong body count", negative)
+        self.assertEqual(settings["flow_pc3_tolerance"], 0.01)
+        self.assertEqual(settings["flow_solver"], "flow_pc3_damped")
+        self.assertEqual(settings["flow_schedule"], "flow_cosmos")
+        self.assertEqual(settings["flow_shift"], 5.0)
+        self.assertEqual(settings["cfg_bump_start"], 0.0)
+        self.assertEqual(settings["cfg_bump_end"], 0.27)
+
+    def test_settings_normalization_rejects_nonfinite_flow_values(self):
+        with self.assertRaisesRegex(ValueError, "flow_shift"):
+            _normalize_settings_object({"flow_shift": float("nan")})
+        with self.assertRaisesRegex(ValueError, "cosmos_sigma"):
+            _normalize_settings_object({"cosmos_sigma_max": float("inf")})
+
+    def test_public_cfg_modes_apply_expected_internal_schedule(self):
+        base = _normalize_settings_object(None)
+
+        bump = _apply_public_cfg_mode(base, "bump cfg")
+        const = _apply_public_cfg_mode(base, "const")
+
+        self.assertEqual(bump["cfg_schedule_mode"], "beta_bump")
+        self.assertEqual(bump["cfg_peak_boost"], 0.60)
+        self.assertEqual(bump["cfg_bump_start"], 0.0)
+        self.assertEqual(bump["cfg_bump_end"], 0.27)
+        self.assertEqual(const["cfg_schedule_mode"], "constant")
+        self.assertEqual(const["cfg_peak_boost"], 0.0)
+        self.assertEqual(const["cfg_early_scale"], 1.0)
+        self.assertEqual(const["late_cfg_scale"], 1.0)
 
 
 if __name__ == "__main__":

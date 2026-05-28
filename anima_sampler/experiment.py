@@ -21,6 +21,7 @@ PARAMETER_SWEEP_KEYS = [
     "flow_pc3_gamma",
     "flow_pc3_tolerance",
     "flow_schedule",
+    "flow_shift",
     "cfg_legacy_progress",
     "denoise_legacy_progress",
     "cosmos_sigma_max",

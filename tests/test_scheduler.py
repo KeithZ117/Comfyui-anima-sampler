@@ -9,6 +9,7 @@ from anima_sampler.scheduler import (
     build_flow_cosmos_lambda_biased_sigmas,
     build_flow_cosmos_rho_rf_tail_sigmas,
     build_flow_cosmos_rho_sigmas,
+    build_flow_cosmos_shift_rf_tail_sigmas,
     build_flow_cosmos_sigmas,
     build_phase_positions,
     build_simple_sigmas,
@@ -82,6 +83,36 @@ class SchedulerTests(unittest.TestCase):
             build_flow_cosmos_beta_sigmas(4, beta=0.0, sigma_max=80.0, sigma_min=0.002),
             base,
         )
+
+    def test_flow_cosmos_shift_rf_tail_keeps_shifted_start_and_unshifted_tail(self):
+        full_shift = build_flow_cosmos_beta_sigmas(35, beta=5.0, sigma_max=80.0, sigma_min=0.002)
+        shifted_tail = build_flow_cosmos_shift_rf_tail_sigmas(
+            35,
+            beta=5.0,
+            tail_delta_ell_max=0.5,
+            sigma_max=80.0,
+            sigma_min=0.002,
+        )
+
+        self.assertEqual(len(shifted_tail), 36)
+        self.assertAlmostEqual(shifted_tail[0], 400.0 / 401.0, places=6)
+        self.assertAlmostEqual(shifted_tail[-2], 0.002 / 1.002, places=6)
+        self.assertLess(shifted_tail[-2], full_shift[-2])
+        self.assertEqual(shifted_tail[-1], 0.0)
+        self.assertTrue(all(left > right for left, right in zip(shifted_tail, shifted_tail[1:-1])))
+
+    def test_flow_cosmos_shift_rf_tail_limits_late_ell_gap(self):
+        shifted_tail = build_flow_cosmos_shift_rf_tail_sigmas(
+            35,
+            beta=5.0,
+            tail_delta_ell_max=0.5,
+            sigma_max=80.0,
+            sigma_min=0.002,
+        )
+
+        last_gap = _flow_ell(shifted_tail[-2]) - _flow_ell(shifted_tail[-3])
+
+        self.assertLessEqual(last_gap, 0.5 + 1e-9)
 
     def test_flow_cosmos_lambda_biased_keeps_cosmos_endpoints(self):
         sigmas = build_flow_cosmos_lambda_biased_sigmas(

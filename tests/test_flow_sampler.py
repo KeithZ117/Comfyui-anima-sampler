@@ -104,17 +104,25 @@ class FlowSamplerScheduleTests(unittest.TestCase):
             denoise=1.0,
             flow_schedule="flow_cosmos_lambda_biased_strong",
         )
-        flow_cosmos_beta5 = build_anima_sigmas(
+        flow_cosmos_shift5 = build_anima_sigmas(
             model,
             4,
             denoise=1.0,
-            flow_schedule="flow_cosmos_beta5",
+            flow_schedule="flow_cosmos",
+            flow_shift=5.0,
         )
         flow_cosmos_rho7_rf_tail_auto = build_anima_sigmas(
             model,
             4,
             denoise=1.0,
             flow_schedule="flow_cosmos_rho7_rf_tail_auto",
+        )
+        flow_cosmos_rho7_with_shift = build_anima_sigmas(
+            model,
+            4,
+            denoise=1.0,
+            flow_schedule="flow_cosmos_rho7_rf_tail_auto",
+            flow_shift=5.0,
         )
 
         self.assertEqual(simple.tolist(), [1.0, 0.75, 0.5, 0.25, 0.0])
@@ -125,12 +133,14 @@ class FlowSamplerScheduleTests(unittest.TestCase):
         self.assertAlmostEqual(float(flow_cosmos_lambda_biased_strong[0]), 80.0 / 81.0, places=5)
         self.assertAlmostEqual(float(flow_cosmos_lambda_biased_strong[-2]), 0.002 / 1.002, places=5)
         self.assertEqual(float(flow_cosmos_lambda_biased_strong[-1]), 0.0)
-        self.assertAlmostEqual(float(flow_cosmos_beta5[0]), 400.0 / 401.0, places=5)
-        self.assertAlmostEqual(float(flow_cosmos_beta5[-2]), 0.01 / 1.01, places=5)
-        self.assertGreater(float(flow_cosmos_beta5[0]), float(flow_cosmos[0]))
+        self.assertAlmostEqual(float(flow_cosmos_shift5[0]), 400.0 / 401.0, places=5)
+        self.assertAlmostEqual(float(flow_cosmos_shift5[-2]), 0.002 / 1.002, places=5)
+        self.assertGreater(float(flow_cosmos_shift5[0]), float(flow_cosmos[0]))
+        self.assertEqual(float(flow_cosmos_shift5[-1]), 0.0)
         self.assertAlmostEqual(float(flow_cosmos_rho7_rf_tail_auto[0]), 80.0 / 81.0, places=5)
         self.assertAlmostEqual(float(flow_cosmos_rho7_rf_tail_auto[-2]), 0.002 / 1.002, places=5)
         self.assertEqual(float(flow_cosmos_rho7_rf_tail_auto[-1]), 0.0)
+        self.assertEqual(flow_cosmos_rho7_with_shift.tolist(), flow_cosmos_rho7_rf_tail_auto.tolist())
 
     def test_build_anima_sigmas_rejects_unknown_schedule(self):
         model = _DummyModel(torch.linspace(0.0, 1.0, 101))
@@ -141,6 +151,26 @@ class FlowSamplerScheduleTests(unittest.TestCase):
                 4,
                 denoise=1.0,
                 flow_schedule="not_a_schedule",
+            )
+
+    def test_build_anima_sigmas_rejects_nonfinite_flow_values(self):
+        model = _DummyModel(torch.linspace(0.0, 1.0, 101))
+
+        with self.assertRaisesRegex(ValueError, "flow_shift"):
+            build_anima_sigmas(
+                model,
+                4,
+                denoise=1.0,
+                flow_schedule="flow_cosmos",
+                flow_shift=float("nan"),
+            )
+        with self.assertRaisesRegex(ValueError, "cosmos_sigma"):
+            build_anima_sigmas(
+                model,
+                4,
+                denoise=1.0,
+                flow_schedule="flow_cosmos",
+                cosmos_sigma_max=float("inf"),
             )
 
     def test_hybrid_tail_start_detects_uniform_ell_tail_for_history_reset(self):
@@ -158,6 +188,22 @@ class FlowSamplerScheduleTests(unittest.TestCase):
         self.assertGreater(start, 0)
         self.assertIsNone(_hybrid_tail_start_step(torch, sigmas, "flow_cosmos"))
 
+    def test_hybrid_tail_start_detects_shift_rf_tail_for_history_reset(self):
+        model = _DummyModel(torch.linspace(0.0, 1.0, 101))
+        sigmas = build_anima_sigmas(
+            model,
+            35,
+            denoise=1.0,
+            flow_schedule="flow_cosmos",
+            flow_shift=5.0,
+        )
+
+        start = _hybrid_tail_start_step(torch, sigmas, "flow_cosmos", flow_shift=5.0)
+
+        self.assertIsNotNone(start)
+        self.assertGreater(start, 0)
+        self.assertIsNone(_hybrid_tail_start_step(torch, sigmas, "flow_cosmos", flow_shift=1.0))
+
     def test_flow_cosmos_partial_denoise_uses_rf_lambda_start(self):
         model = _DummyModel(torch.linspace(0.0, 1.0, 101))
 
@@ -171,6 +217,29 @@ class FlowSamplerScheduleTests(unittest.TestCase):
         )
 
         expected_start_sigma = (80.0 * 0.002) ** 0.5
+        self.assertEqual(len(sigmas), 5)
+        self.assertAlmostEqual(
+            float(sigmas[0]),
+            expected_start_sigma / (1.0 + expected_start_sigma),
+            places=6,
+        )
+        self.assertAlmostEqual(float(sigmas[-2]), 0.002 / 1.002, places=6)
+        self.assertEqual(float(sigmas[-1]), 0.0)
+
+    def test_flow_cosmos_partial_denoise_applies_shifted_start_with_unshifted_tail(self):
+        model = _DummyModel(torch.linspace(0.0, 1.0, 101))
+
+        sigmas = build_anima_sigmas(
+            model,
+            4,
+            denoise=0.5,
+            flow_schedule="flow_cosmos",
+            flow_shift=5.0,
+            cosmos_sigma_max=80.0,
+            cosmos_sigma_min=0.002,
+        )
+
+        expected_start_sigma = (80.0 * 5.0 * 0.002) ** 0.5
         self.assertEqual(len(sigmas), 5)
         self.assertAlmostEqual(
             float(sigmas[0]),
@@ -391,10 +460,6 @@ class FlowSamplerScheduleTests(unittest.TestCase):
         model.sampling.shift = 3.0
 
         self.assertIn("bypassed by flow_cosmos", _describe_model_sampling_shift(model, flow_schedule="flow_cosmos"))
-        self.assertIn(
-            "bypassed by flow_cosmos_beta5",
-            _describe_model_sampling_shift(model, flow_schedule="flow_cosmos_beta5"),
-        )
 
     def test_4d_image_latent_gets_temporal_axis_for_cosmos(self):
         latent = {"samples": torch.zeros(1, 16, 64, 64)}
@@ -1094,6 +1159,7 @@ def _dummy_sampler_log(
         x_embedder_features="unknown",
         sampler_core=sampler_core,
         flow_schedule="flow_cosmos",
+        flow_shift=5.0,
         cfg_schedule_mode="beta_bump",
         cfg_schedule_domain="lambda",
         denoise_legacy_progress=False,

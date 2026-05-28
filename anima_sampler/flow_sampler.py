@@ -22,9 +22,9 @@ import math
 from typing import Any
 
 from .scheduler import (
-    build_flow_cosmos_beta_sigmas,
     build_flow_cosmos_lambda_biased_sigmas,
     build_flow_cosmos_rho_rf_tail_sigmas,
+    build_flow_cosmos_shift_rf_tail_sigmas,
     build_flow_cosmos_sigmas,
     build_simple_sigmas,
 )
@@ -42,7 +42,6 @@ FLOW_SOLVERS = [
 FLOW_SCHEDULES = [
     "flow_cosmos",
     "flow_cosmos_lambda_biased_strong",
-    "flow_cosmos_beta5",
     "flow_cosmos_rho7_rf_tail_auto",
     "simple",
 ]
@@ -59,6 +58,26 @@ CFG_SCHEDULE_MODES = [
     "constant",
 ]
 
+FLOW_SHIFT_EPSILON = 1e-6
+
+
+def _flow_shift_log_line(flow_schedule: str, flow_shift: float) -> str:
+    if str(flow_schedule) == "flow_cosmos":
+        return f"flow_shift: {float(flow_shift):.4f}"
+    return f"flow_shift: {float(flow_shift):.4f} (ignored by {flow_schedule})"
+
+
+def _flow_shift_is_active(flow_schedule: str, flow_shift: float) -> bool:
+    try:
+        value = float(flow_shift)
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(flow_schedule) == "flow_cosmos"
+        and math.isfinite(value)
+        and value > 1.0 + FLOW_SHIFT_EPSILON
+    )
+
 
 @dataclass(frozen=True)
 class AnimaSamplerLog:
@@ -73,6 +92,7 @@ class AnimaSamplerLog:
     x_embedder_features: str
     sampler_core: str
     flow_schedule: str
+    flow_shift: float
     cfg_schedule_mode: str
     cfg_schedule_domain: str
     denoise_legacy_progress: bool
@@ -122,6 +142,7 @@ class AnimaSamplerLog:
                 f"x_embedder_features: {self.x_embedder_features}",
                 f"sampler_core: {self.sampler_core}",
                 f"flow_schedule: {self.flow_schedule}",
+                _flow_shift_log_line(self.flow_schedule, self.flow_shift),
                 f"cfg_schedule_mode: {self.cfg_schedule_mode}",
                 f"cfg_schedule_domain: {self.cfg_schedule_domain}",
                 f"denoise_legacy_progress: {self.denoise_legacy_progress}",
@@ -410,6 +431,7 @@ def build_anima_sigmas(
     *,
     denoise: float,
     flow_schedule: str,
+    flow_shift: float = 1.0,
     cosmos_sigma_max: float = 80.0,
     cosmos_sigma_min: float = 0.002,
     denoise_legacy_progress: bool = False,
@@ -425,6 +447,18 @@ def build_anima_sigmas(
         raise ValueError("steps must be at least 1")
     if not (0.0 < denoise <= 1.0):
         raise ValueError("denoise must be in the range (0, 1]")
+    flow_schedule = str(flow_schedule)
+    flow_shift = float(flow_shift)
+    cosmos_sigma_max = float(cosmos_sigma_max)
+    cosmos_sigma_min = float(cosmos_sigma_min)
+    if not math.isfinite(flow_shift) or flow_shift < 1.0:
+        raise ValueError("flow_shift must be finite and >= 1")
+    if not (
+        math.isfinite(cosmos_sigma_min)
+        and math.isfinite(cosmos_sigma_max)
+        and 0.0 < cosmos_sigma_min < cosmos_sigma_max
+    ):
+        raise ValueError("expected finite 0 < cosmos_sigma_min < cosmos_sigma_max")
 
     try:
         model_sampling = model.get_model_object("model_sampling")
@@ -449,26 +483,21 @@ def build_anima_sigmas(
             steps,
             denoise=denoise,
             flow_schedule=flow_schedule,
+            flow_shift=flow_shift,
             cosmos_sigma_max=cosmos_sigma_max,
             cosmos_sigma_min=cosmos_sigma_min,
         )
     elif flow_schedule == "flow_cosmos":
-        values = build_flow_cosmos_sigmas(
+        values = _build_flow_cosmos_sigmas(
             schedule_steps,
-            sigma_max=cosmos_sigma_max,
-            sigma_min=cosmos_sigma_min,
+            flow_shift=flow_shift,
+            cosmos_sigma_max=cosmos_sigma_max,
+            cosmos_sigma_min=cosmos_sigma_min,
         )
     elif flow_schedule == "flow_cosmos_lambda_biased_strong":
         values = build_flow_cosmos_lambda_biased_sigmas(
             schedule_steps,
             strength="strong",
-            sigma_max=cosmos_sigma_max,
-            sigma_min=cosmos_sigma_min,
-        )
-    elif flow_schedule == "flow_cosmos_beta5":
-        values = build_flow_cosmos_beta_sigmas(
-            schedule_steps,
-            beta=5.0,
             sigma_max=cosmos_sigma_max,
             sigma_min=cosmos_sigma_min,
         )
@@ -503,20 +532,27 @@ def _build_rf_denoise_sigmas(
     *,
     denoise: float,
     flow_schedule: str,
+    flow_shift: float,
     cosmos_sigma_max: float,
     cosmos_sigma_min: float,
 ) -> list[float]:
-    if flow_schedule == "flow_cosmos_beta5":
-        beta = 5.0
+    if flow_schedule == "flow_cosmos":
+        start_sigma_max = (
+            cosmos_sigma_max * flow_shift
+            if _flow_shift_is_active(flow_schedule, flow_shift)
+            else cosmos_sigma_max
+        )
         sigma_start = _rf_denoise_start_external_sigma(
             denoise,
-            sigma_max=cosmos_sigma_max * beta,
-            sigma_min=cosmos_sigma_min * beta,
+            sigma_max=start_sigma_max,
+            sigma_min=cosmos_sigma_min,
         )
-        return _exact_logspace_rflow_sigmas(
+        return _build_flow_cosmos_sigmas(
             steps,
-            sigma_max=sigma_start,
-            sigma_min=cosmos_sigma_min * beta,
+            flow_shift=flow_shift,
+            cosmos_sigma_max=cosmos_sigma_max,
+            cosmos_sigma_min=cosmos_sigma_min,
+            sigma_start=sigma_start,
         )
 
     sigma_start = _rf_denoise_start_external_sigma(
@@ -525,12 +561,6 @@ def _build_rf_denoise_sigmas(
         sigma_min=cosmos_sigma_min,
     )
 
-    if flow_schedule == "flow_cosmos":
-        return _exact_logspace_rflow_sigmas(
-            steps,
-            sigma_max=sigma_start,
-            sigma_min=cosmos_sigma_min,
-        )
     if flow_schedule == "flow_cosmos_lambda_biased_strong":
         return build_flow_cosmos_lambda_biased_sigmas(
             steps,
@@ -548,6 +578,35 @@ def _build_rf_denoise_sigmas(
             **params,
         )
     raise ValueError(f"unsupported RF denoise flow_schedule: {flow_schedule}")
+
+
+def _build_flow_cosmos_sigmas(
+    steps: int,
+    *,
+    flow_shift: float,
+    cosmos_sigma_max: float,
+    cosmos_sigma_min: float,
+    sigma_start: float | None = None,
+) -> list[float]:
+    if _flow_shift_is_active("flow_cosmos", flow_shift):
+        return build_flow_cosmos_shift_rf_tail_sigmas(
+            steps,
+            beta=float(flow_shift),
+            sigma_max=cosmos_sigma_max,
+            sigma_min=cosmos_sigma_min,
+            sigma_start=sigma_start,
+        )
+    if sigma_start is not None:
+        return _exact_logspace_rflow_sigmas(
+            steps,
+            sigma_max=float(sigma_start),
+            sigma_min=cosmos_sigma_min,
+        )
+    return build_flow_cosmos_sigmas(
+        steps,
+        sigma_max=cosmos_sigma_max,
+        sigma_min=cosmos_sigma_min,
+    )
 
 
 def _rho_rf_tail_params(flow_schedule: str) -> dict[str, float | None]:
@@ -632,6 +691,7 @@ def run_comfy_anima_sampler(
     denoise: float,
     flow_solver: str,
     flow_schedule: str,
+    flow_shift: float,
     flow_er_order: int,
     flow_pc3_gamma: float,
     flow_pc3_tolerance: float,
@@ -703,6 +763,7 @@ def run_comfy_anima_sampler(
         steps,
         denoise=denoise,
         flow_schedule=flow_schedule,
+        flow_shift=flow_shift,
         cosmos_sigma_max=cosmos_sigma_max,
         cosmos_sigma_min=cosmos_sigma_min,
         denoise_legacy_progress=denoise_legacy_progress,
@@ -719,6 +780,7 @@ def run_comfy_anima_sampler(
         extra_options={
             "flow_solver": flow_solver,
             "flow_schedule": flow_schedule,
+            "flow_shift": float(flow_shift),
             "flow_er_order": int(flow_er_order),
             "flow_pc3_gamma": float(flow_pc3_gamma),
             "flow_pc3_tolerance": float(flow_pc3_tolerance),
@@ -782,6 +844,7 @@ def run_comfy_anima_sampler(
         x_embedder_features=str(x_embedder_features or "unknown"),
         sampler_core=flow_solver,
         flow_schedule=flow_schedule,
+        flow_shift=float(flow_shift),
         cfg_schedule_mode=str(cfg_schedule_mode),
         cfg_schedule_domain=str(cfg_schedule_domain),
         denoise_legacy_progress=bool(denoise_legacy_progress),
@@ -1262,6 +1325,7 @@ def sample_anima_flow_corrective(
     *,
     flow_solver: str,
     flow_schedule: str,
+    flow_shift: float = 1.0,
     flow_er_order: int,
     flow_pc3_gamma: float,
     flow_pc3_tolerance: float,
@@ -1321,7 +1385,12 @@ def sample_anima_flow_corrective(
     pc3_state = FlowPC3State()
     fsal_cache_state = FlowFSALCacheState()
     stats = _init_sampler_stats(sampler_stats)
-    hybrid_tail_start_step = _hybrid_tail_start_step(torch, sigmas, flow_schedule)
+    hybrid_tail_start_step = _hybrid_tail_start_step(
+        torch,
+        sigmas,
+        flow_schedule,
+        flow_shift=flow_shift,
+    )
     sparse_pc3_budget = _sparse_pc3_budget(total_steps)
     sparse_pc3_used = {"high": 0, "body": 0, "tail": 0}
     sparse_last_pc3_step = -999
@@ -2292,8 +2361,16 @@ def _finite_schedule_terminal(torch, sigmas):
     return sigmas[-1]
 
 
-def _hybrid_tail_start_step(torch, sigmas, flow_schedule: str) -> int | None:
-    if not str(flow_schedule).startswith("flow_cosmos_rho7_rf_tail_"):
+def _hybrid_tail_start_step(
+    torch,
+    sigmas,
+    flow_schedule: str,
+    *,
+    flow_shift: float = 1.0,
+) -> int | None:
+    is_rho_tail = str(flow_schedule).startswith("flow_cosmos_rho7_rf_tail_")
+    is_shift_tail = _flow_shift_is_active(flow_schedule, flow_shift)
+    if not (is_rho_tail or is_shift_tail):
         return None
 
     finite_count = int(sigmas.shape[0]) - 1
