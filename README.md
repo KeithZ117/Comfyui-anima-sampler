@@ -31,21 +31,13 @@ single-image examples instead of a four-way grid. Import
 [`examples/workflows/anima_better_sampler.json`](examples/workflows/anima_better_sampler.json)
 in ComfyUI to inspect the example workflow.
 
-**UniPC, linear shift5, const CFG 7**
+| UniPC, linear shift5, const CFG 7 | PC3, linear shift5, const CFG 7 |
+| --- | --- |
+| <img src="examples/comparison/unipc_linear_shift_cfg7.png" alt="UniPC linear shift CFG 7 example" width="260"> | <img src="examples/comparison/pc3_linear_shift_cfg7.png" alt="PC3 linear shift CFG 7 example" width="260"> |
 
-<img src="examples/comparison/unipc_linear_shift_cfg7.png" alt="UniPC linear shift CFG 7 example" width="520">
-
-**PC3, linear shift5, const CFG 7**
-
-<img src="examples/comparison/pc3_linear_shift_cfg7.png" alt="PC3 linear shift CFG 7 example" width="520">
-
-**er_sde + simple, CFG 4.5**
-
-<img src="examples/comparison/er_sde_simple_cfg45.png" alt="er_sde simple CFG 4.5 example" width="520">
-
-**er_sde + simple, CFG 7**
-
-<img src="examples/comparison/er_sde_simple_cfg7.png" alt="er_sde simple CFG 7 example" width="520">
+| er_sde + simple, CFG 4.5 | er_sde + simple, CFG 7 |
+| --- | --- |
+| <img src="examples/comparison/er_sde_simple_cfg45.png" alt="er_sde simple CFG 4.5 example" width="260"> | <img src="examples/comparison/er_sde_simple_cfg7.png" alt="er_sde simple CFG 7 example" width="260"> |
 
 ## Nodes
 
