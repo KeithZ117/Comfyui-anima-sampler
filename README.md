@@ -123,6 +123,15 @@ The packaged default now follows the Cosmos 2.5-style path:
 `flow_unipc2_x0 + flow_rf_linear_shift + flow_shift 5.0 + const cfg 7.0`,
 with no final clean pass when the settings node is disconnected.
 
+Official reference combinations:
+
+- Cosmos2: `AB2 x0/denoised solver + Karras/rho7 sigmas`
+  (`sigma_max 80.0`, `sigma_min 0.002`, `rho 7`) + constant CFG + final
+  clean pass at the last non-zero sigma.
+- Cosmos 2.5: `FlowUniPC order 2 + normalized RF linear shift schedule`
+  (`shift 5` in the released configs) + constant CFG, walking to terminal
+  zero without the old Cosmos2-style final clean pass.
+
 For maximum quality, my preferred profile is
 `flow_pc3_damped + flow_rf_linear_shift + flow_shift 5.0 + ramp cfg 7.0`.
 
