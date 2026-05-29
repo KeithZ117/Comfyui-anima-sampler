@@ -11,6 +11,8 @@ from anima_sampler.scheduler import (
     build_flow_cosmos_rho_sigmas,
     build_flow_cosmos_shift_rf_tail_sigmas,
     build_flow_cosmos_sigmas,
+    build_flow_rf_linear_s_tail_shift5_sigmas,
+    build_flow_rf_linear_shift_sigmas,
     build_phase_positions,
     build_simple_sigmas,
 )
@@ -225,6 +227,38 @@ class SchedulerTests(unittest.TestCase):
             for index in range(first_tail_index - 1, len(auto) - 2)
         ]
         self.assertLessEqual(max(tail_gaps), 0.5 + 1e-9)
+
+    def test_flow_rf_linear_shift_matches_cosmos25_default_grid(self):
+        sigmas = build_flow_rf_linear_shift_sigmas(35, shift=5.0)
+
+        self.assertEqual(len(sigmas), 36)
+        self.assertAlmostEqual(sigmas[0], 0.9997998398718975, places=9)
+        self.assertAlmostEqual(sigmas[1], 0.9939484034085590, places=9)
+        self.assertAlmostEqual(sigmas[34], 0.1280900607638886, places=9)
+        self.assertEqual(sigmas[-1], 0.0)
+        self.assertTrue(all(left > right for left, right in zip(sigmas, sigmas[1:])))
+
+    def test_flow_rf_linear_shift_one_is_unshifted_linear_grid(self):
+        sigmas = build_flow_rf_linear_shift_sigmas(35, shift=1.0)
+
+        self.assertAlmostEqual(sigmas[0], 0.999, places=12)
+        self.assertAlmostEqual(sigmas[34], 0.999 / 35.0, places=12)
+        self.assertEqual(sigmas[-1], 0.0)
+
+    def test_flow_rf_linear_s_tail_shift5_tracks_shift5_until_step30_tail(self):
+        linear = build_flow_rf_linear_shift_sigmas(35, shift=5.0)
+        s_tail = build_flow_rf_linear_s_tail_shift5_sigmas(35)
+
+        self.assertEqual(len(s_tail), 36)
+        self.assertAlmostEqual(s_tail[0], linear[0], places=12)
+        self.assertAlmostEqual(s_tail[5], 0.9675232412555262, places=9)
+        self.assertAlmostEqual(s_tail[20], 0.7890865040783209, places=9)
+        self.assertAlmostEqual(s_tail[34], 0.020471253008245063, places=9)
+        self.assertEqual(s_tail[-1], 0.0)
+        self.assertAlmostEqual(s_tail[20], linear[20], places=3)
+        self.assertLess(s_tail[30], linear[30])
+        self.assertLess(s_tail[34], linear[34])
+        self.assertTrue(all(left > right for left, right in zip(s_tail, s_tail[1:])))
 
     def test_phase_steps_sum_to_requested_steps(self):
         phase_steps = allocate_phase_steps(

@@ -22,6 +22,8 @@ from .scheduler import (
     build_flow_cosmos_rho_sigmas,
     build_flow_cosmos_shift_rf_tail_sigmas,
     build_flow_cosmos_sigmas,
+    build_flow_rf_linear_s_tail_shift5_sigmas,
+    build_flow_rf_linear_shift_sigmas,
     build_simple_sigmas,
     early_dense_simple_scheduler,
 )
@@ -41,6 +43,8 @@ __all__ = [
     "build_flow_cosmos_rho_sigmas",
     "build_flow_cosmos_shift_rf_tail_sigmas",
     "build_flow_cosmos_sigmas",
+    "build_flow_rf_linear_s_tail_shift5_sigmas",
+    "build_flow_rf_linear_shift_sigmas",
     "build_simple_sigmas",
     "early_dense_simple_scheduler",
 ]

@@ -20,8 +20,17 @@ PARAMETER_SWEEP_KEYS = [
     "flow_er_order",
     "flow_pc3_gamma",
     "flow_pc3_tolerance",
+    "flow_unipc_order",
+    "flow_unipc_solver_type",
+    "flow_unipc_lower_order_final",
+    "flow_unipc_disable_corrector_first",
+    "flow_unipc_thresholding",
+    "flow_unipc_dynamic_thresholding_ratio",
+    "flow_unipc_sample_max_value",
     "flow_schedule",
     "flow_shift",
+    "flow_rho7_tail_auto",
+    "final_clean_pass",
     "cfg_legacy_progress",
     "denoise_legacy_progress",
     "cosmos_sigma_max",
@@ -51,16 +60,27 @@ PARAMETER_SWEEP_KEYS = [
 NO_SECONDARY_SWEEP = "<none>"
 PARAMETER_MATRIX_KEYS = [NO_SECONDARY_SWEEP, *PARAMETER_SWEEP_KEYS]
 
-_INTEGER_PARAMETERS = {"seed", "steps", "flow_er_order"}
+_INTEGER_PARAMETERS = {
+    "seed",
+    "steps",
+    "flow_er_order",
+    "flow_unipc_order",
+    "flow_unipc_disable_corrector_first",
+}
 _BOOLEAN_PARAMETERS = {
     "cfg_legacy_progress",
     "denoise_legacy_progress",
+    "flow_rho7_tail_auto",
+    "final_clean_pass",
+    "flow_unipc_lower_order_final",
+    "flow_unipc_thresholding",
     "rf_endpoint_noise_refresh_enabled",
 }
 _ENUM_PARAMETERS = {
     "cfg_schedule_mode": CFG_SCHEDULE_MODES,
     "flow_solver": FLOW_SOLVERS,
     "flow_schedule": FLOW_SCHEDULES,
+    "flow_unipc_solver_type": ["bh2", "bh1"],
 }
 
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from dataclasses import dataclass
-from math import exp, floor, log
+from math import exp, floor, isfinite, log
 from typing import Iterable, Sequence
 
 
@@ -319,6 +319,99 @@ def build_flow_cosmos_rho_rf_tail_sigmas(
         )
 
     return [_cosmos_rflow_time(sigma, sigma_max=sigma_max) for sigma in external_sigmas] + [0.0]
+
+
+def build_flow_rf_linear_shift_sigmas(
+    steps: int,
+    *,
+    shift: float = 5.0,
+    num_train_timesteps: int = 1000,
+) -> list[float]:
+    """Build Cosmos 2.5's normalized RF linear sigma schedule with shift.
+
+    Cosmos Predict2.5's FlowUniPC scheduler initializes normalized RF sigmas
+    from a linear training grid, then at inference uses ``num_steps + 1``
+    evenly spaced values from ``sigma_max`` to ``0`` and drops the duplicate
+    terminal value before appending a final zero. The inference shift is:
+
+    ``shift * sigma / (1 + (shift - 1) * sigma)``.
+
+    With the default ``num_train_timesteps=1000``, the first unshifted
+    inference sigma is ``0.999`` and the explicit terminal entry is ``0.0``.
+    """
+
+    _validate_steps(steps)
+    shift = float(shift)
+    if not isfinite(shift) or shift <= 0.0:
+        raise ValueError("shift must be finite and positive")
+    if num_train_timesteps < 2:
+        raise ValueError("num_train_timesteps must be at least 2")
+
+    sigma_max = 1.0 - (1.0 / float(num_train_timesteps))
+    values = []
+    for step in range(steps):
+        sigma = sigma_max * (1.0 - step / steps)
+        values.append(_rf_shift_sigma(sigma, shift=shift))
+    values.append(0.0)
+    return values
+
+
+def build_flow_rf_linear_s_tail_shift5_sigmas(
+    steps: int,
+    *,
+    center: float = 0.94,
+    width: float = 0.04,
+    num_train_timesteps: int = 1000,
+) -> list[float]:
+    """Build a fixed shift-5 RF linear schedule with an S-shaped tail.
+
+    The front of the schedule follows ``build_flow_rf_linear_shift_sigmas`` at
+    ``shift=5``. A normalized sigmoid gate then lowers the mid/late part of the
+    curve near step 30 at the default 35-step setting. This keeps most of the
+    dynamic linear-shift behavior while reducing the large terminal jump of
+    plain shift-5 linear RF.
+    """
+
+    _validate_steps(steps)
+    center = float(center)
+    width = float(width)
+    if not isfinite(center) or not (0.0 < center < 1.0):
+        raise ValueError("center must be finite and in the range (0, 1)")
+    if not isfinite(width) or width <= 0.0:
+        raise ValueError("width must be finite and positive")
+
+    base = build_flow_rf_linear_shift_sigmas(
+        steps,
+        shift=5.0,
+        num_train_timesteps=num_train_timesteps,
+    )
+    gate_start = _stable_sigmoid(center / width)
+    gate_end = _stable_sigmoid((center - 1.0) / width)
+    gate_denom = gate_start - gate_end
+    if gate_denom <= 0.0:
+        raise ValueError("invalid sigmoid gate parameters")
+
+    values = []
+    for step in range(steps):
+        progress = step / steps
+        raw_gate = _stable_sigmoid((center - progress) / width)
+        gate = (raw_gate - gate_end) / gate_denom
+        values.append(base[step] * min(1.0, max(0.0, gate)))
+    values.append(0.0)
+    return values
+
+
+def _rf_shift_sigma(sigma: float, *, shift: float) -> float:
+    return float(shift) * float(sigma) / (1.0 + (float(shift) - 1.0) * float(sigma))
+
+
+def _stable_sigmoid(value: float) -> float:
+    value = float(value)
+    if value >= 60.0:
+        return 1.0
+    if value <= -60.0:
+        return 0.0
+    return 1.0 / (1.0 + exp(-value))
 
 
 def _rho_with_fixed_lambda_tail(
