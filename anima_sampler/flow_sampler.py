@@ -18,31 +18,38 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
+import json
 import math
 from typing import Any
 
 from .scheduler import (
     build_flow_cosmos_lambda_biased_sigmas,
     build_flow_cosmos_rho_rf_tail_sigmas,
+    build_flow_cosmos_rho_sigmas,
     build_flow_cosmos_shift_rf_tail_sigmas,
     build_flow_cosmos_sigmas,
+    build_flow_rf_linear_s_tail_shift5_sigmas,
+    build_flow_rf_linear_shift_sigmas,
     build_simple_sigmas,
 )
 
 
 FLOW_SOLVERS = [
     "flow_euler",
+    "flow_ab2",
     "flow_heun",
     "flow_pc3_damped",
-    "flow_pc3_fsal_gated",
     "flow_3m_damped",
-    "flow_3m_sparse_pc3_fsal",
+    "flow_unipc2_x0",
     "flow_er",
 ]
 FLOW_SCHEDULES = [
     "flow_cosmos",
+    "flow_cosmos_rf_tail",
     "flow_cosmos_lambda_biased_strong",
-    "flow_cosmos_rho7_rf_tail_auto",
+    "flow_cosmos_rho7",
+    "flow_rf_linear_shift",
+    "flow_rf_linear_s_tail_shift5",
     "simple",
 ]
 
@@ -53,30 +60,22 @@ CFG_SCHEDULE_DOMAINS = [
 ]
 CFG_SCHEDULE_MODES = [
     "beta_bump",
+    "low_to_high",
     "limited_interval",
     "legacy_boost",
     "constant",
 ]
 
-FLOW_SHIFT_EPSILON = 1e-6
-
 
 def _flow_shift_log_line(flow_schedule: str, flow_shift: float) -> str:
-    if str(flow_schedule) == "flow_cosmos":
+    if str(flow_schedule) in {"flow_cosmos_rf_tail", "flow_rf_linear_shift"}:
         return f"flow_shift: {float(flow_shift):.4f}"
+    if str(flow_schedule) == "flow_rf_linear_s_tail_shift5":
+        return (
+            f"flow_shift: {float(flow_shift):.4f} "
+            "(ignored; schedule uses fixed shift5)"
+        )
     return f"flow_shift: {float(flow_shift):.4f} (ignored by {flow_schedule})"
-
-
-def _flow_shift_is_active(flow_schedule: str, flow_shift: float) -> bool:
-    try:
-        value = float(flow_shift)
-    except (TypeError, ValueError):
-        return False
-    return (
-        str(flow_schedule) == "flow_cosmos"
-        and math.isfinite(value)
-        and value > 1.0 + FLOW_SHIFT_EPSILON
-    )
 
 
 @dataclass(frozen=True)
@@ -93,6 +92,8 @@ class AnimaSamplerLog:
     sampler_core: str
     flow_schedule: str
     flow_shift: float
+    flow_rho7_tail_auto: bool
+    final_clean_pass: bool
     cfg_schedule_mode: str
     cfg_schedule_domain: str
     denoise_legacy_progress: bool
@@ -143,6 +144,8 @@ class AnimaSamplerLog:
                 f"sampler_core: {self.sampler_core}",
                 f"flow_schedule: {self.flow_schedule}",
                 _flow_shift_log_line(self.flow_schedule, self.flow_shift),
+                f"flow_rho7_tail_auto: {self.flow_rho7_tail_auto}",
+                f"final_clean_pass: {self.final_clean_pass}",
                 f"cfg_schedule_mode: {self.cfg_schedule_mode}",
                 f"cfg_schedule_domain: {self.cfg_schedule_domain}",
                 f"denoise_legacy_progress: {self.denoise_legacy_progress}",
@@ -199,13 +202,10 @@ class AnimaSamplerLog:
         if self.sampler_core in {
             "flow_heun",
             "flow_pc3_damped",
-            "flow_pc3_fsal_gated",
         }:
-            return max(1, self.actual_steps * 2 - 1)
-        if self.sampler_core == "flow_3m_sparse_pc3_fsal":
-            sparse_budget = min(10, max(5, round(0.23 * self.actual_steps)))
-            return max(1, self.actual_steps + sparse_budget)
-        return max(1, self.actual_steps)
+            calls = max(1, self.actual_steps * 2 - 1)
+            return calls + int(self.final_clean_pass)
+        return max(1, self.actual_steps) + int(self.final_clean_pass)
 
 
 @dataclass
@@ -220,7 +220,7 @@ class FlowERState:
 
 @dataclass
 class FlowPC3State:
-    """History needed by the RF x0 exponential PC3 corrector.
+    """Accepted-state history for the RF x0 exponential PC3 solver.
 
     Store only x0 predictions evaluated on accepted actual sampler states.
     Endpoint predictions from a predictor state are intentionally not history.
@@ -228,23 +228,35 @@ class FlowPC3State:
 
     previous_denoised: Any | None = None
     previous_lambda: Any | None = None
+    previous_previous_denoised: Any | None = None
+    previous_previous_lambda: Any | None = None
 
 
 @dataclass
 class FlowPC3StepResult:
-    """Accepted PC3 step plus diagnostics used by FSAL cache gates."""
+    """Accepted PC3 step plus diagnostics for logs and tests."""
 
     x: Any
     state: FlowPC3State
-    x_heun: Any
-    x_am3: Any
+    x_predictor: Any
+    x_corrected: Any
     gamma: Any
     error: Any
+    predictor_order: int
+    corrector_order: int
+
+
+@dataclass
+class FlowPC3PredictorResult:
+    """PC3 predictor proposal and the internal order actually used."""
+
+    x: Any
+    order: int
 
 
 @dataclass
 class Flow3MStepResult:
-    """Accepted one-eval 3M step plus diagnostics for sparse PC3 gating."""
+    """Accepted one-eval 3M step plus diagnostics."""
 
     x: Any
     state: FlowERState
@@ -257,22 +269,33 @@ class Flow3MStepResult:
 
 
 @dataclass
-class FlowFSALCacheState:
-    """Endpoint denoised cache for PC3 FSAL-style current-call reuse."""
+class FlowUniPC2State:
+    """History for the RF x0 UniPC predictor/corrector."""
 
-    pending_denoised: Any | None = None
-    pending_t: Any | None = None
-    pending_score: float | None = None
-    pending_e_x: float | None = None
-    consecutive_reuse: int = 0
-    steps_since_fresh: int = 0
-    force_next_order_le_2: bool = False
+    previous_denoised: Any | None = None
+    previous_t: Any | None = None
+    previous_lambda: Any | None = None
+    previous_previous_denoised: Any | None = None
+    previous_previous_t: Any | None = None
+    previous_previous_lambda: Any | None = None
+    last_sample: Any | None = None
+    lower_order_nums: int = 0
+    this_order: int = 1
+    model_outputs: tuple[Any | None, ...] | None = None
+    sigma_history: tuple[Any | None, ...] | None = None
+    lambda_history: tuple[Any | None, ...] | None = None
 
-    def clear_pending(self):
-        self.pending_denoised = None
-        self.pending_t = None
-        self.pending_score = None
-        self.pending_e_x = None
+
+@dataclass
+class FlowUniPC2StepResult:
+    """Accepted UniPC step plus diagnostics for tests and logs."""
+
+    x: Any
+    state: FlowUniPC2State
+    x_corrected: Any
+    x_predictor: Any
+    predictor_order: int
+    corrector_order: int
 
 
 def cfg_at_progress(
@@ -300,8 +323,8 @@ def cfg_at_progress(
 
     ``progress`` is 0 at the first denoising transition and 1 near the last.
     ``legacy_boost`` preserves the original early-high behavior. The newer
-    modes keep very early guidance neutral or mild, then add a bounded bump
-    around the early/mid-high structure-forming region.
+    modes keep very early guidance neutral or mild, then either ramp guidance
+    upward or add a bounded bump around the structure-forming region.
     """
 
     progress = _clamp01(progress)
@@ -333,6 +356,11 @@ def cfg_at_progress(
     early_mul = early_scale + (1.0 - early_scale) * _smoothstep(0.0, early_ramp, progress)
     late_mul = 1.0 + (late_scale - 1.0) * _smoothstep(late_cfg_start, 1.0, progress)
     cfg = base_cfg * early_mul * late_mul
+
+    if mode == "low_to_high":
+        start_cfg = base_cfg * early_scale
+        ramp = _smoothstep(cfg_interval_start, cfg_interval_rise_end, progress)
+        return max(0.0, start_cfg + (base_cfg - start_cfg) * ramp)
 
     if mode == "limited_interval":
         bump = _interval_window(
@@ -432,6 +460,7 @@ def build_anima_sigmas(
     denoise: float,
     flow_schedule: str,
     flow_shift: float = 1.0,
+    flow_rho7_tail_auto: bool = False,
     cosmos_sigma_max: float = 80.0,
     cosmos_sigma_min: float = 0.002,
     denoise_legacy_progress: bool = False,
@@ -449,6 +478,9 @@ def build_anima_sigmas(
         raise ValueError("denoise must be in the range (0, 1]")
     flow_schedule = str(flow_schedule)
     flow_shift = float(flow_shift)
+    if flow_schedule == "flow_cosmos_rho7_rf_tail_auto":
+        flow_schedule = "flow_cosmos_rho7"
+        flow_rho7_tail_auto = True
     cosmos_sigma_max = float(cosmos_sigma_max)
     cosmos_sigma_min = float(cosmos_sigma_min)
     if not math.isfinite(flow_shift) or flow_shift < 1.0:
@@ -484,11 +516,18 @@ def build_anima_sigmas(
             denoise=denoise,
             flow_schedule=flow_schedule,
             flow_shift=flow_shift,
+            flow_rho7_tail_auto=flow_rho7_tail_auto,
             cosmos_sigma_max=cosmos_sigma_max,
             cosmos_sigma_min=cosmos_sigma_min,
         )
     elif flow_schedule == "flow_cosmos":
         values = _build_flow_cosmos_sigmas(
+            schedule_steps,
+            cosmos_sigma_max=cosmos_sigma_max,
+            cosmos_sigma_min=cosmos_sigma_min,
+        )
+    elif flow_schedule == "flow_cosmos_rf_tail":
+        values = _build_flow_cosmos_rf_tail_sigmas(
             schedule_steps,
             flow_shift=flow_shift,
             cosmos_sigma_max=cosmos_sigma_max,
@@ -501,15 +540,20 @@ def build_anima_sigmas(
             sigma_max=cosmos_sigma_max,
             sigma_min=cosmos_sigma_min,
         )
-    elif flow_schedule.startswith("flow_cosmos_rho7_rf_tail_"):
-        params = _rho_rf_tail_params(flow_schedule)
-        values = build_flow_cosmos_rho_rf_tail_sigmas(
+    elif flow_schedule == "flow_cosmos_rho7":
+        values = _build_flow_cosmos_rho7_sigmas(
             schedule_steps,
-            order=7.0,
-            sigma_max=cosmos_sigma_max,
-            sigma_min=cosmos_sigma_min,
-            **params,
+            flow_rho7_tail_auto=flow_rho7_tail_auto,
+            cosmos_sigma_max=cosmos_sigma_max,
+            cosmos_sigma_min=cosmos_sigma_min,
         )
+    elif flow_schedule == "flow_rf_linear_shift":
+        values = build_flow_rf_linear_shift_sigmas(
+            schedule_steps,
+            shift=flow_shift,
+        )
+    elif flow_schedule == "flow_rf_linear_s_tail_shift5":
+        values = build_flow_rf_linear_s_tail_shift5_sigmas(schedule_steps)
     elif flow_schedule == "simple":
         values = build_simple_sigmas(source_sigmas, schedule_steps)
     else:
@@ -533,21 +577,31 @@ def _build_rf_denoise_sigmas(
     denoise: float,
     flow_schedule: str,
     flow_shift: float,
+    flow_rho7_tail_auto: bool,
     cosmos_sigma_max: float,
     cosmos_sigma_min: float,
 ) -> list[float]:
     if flow_schedule == "flow_cosmos":
-        start_sigma_max = (
-            cosmos_sigma_max * flow_shift
-            if _flow_shift_is_active(flow_schedule, flow_shift)
-            else cosmos_sigma_max
+        sigma_start = _rf_denoise_start_external_sigma(
+            denoise,
+            sigma_max=cosmos_sigma_max,
+            sigma_min=cosmos_sigma_min,
         )
+        return _build_flow_cosmos_sigmas(
+            steps,
+            cosmos_sigma_max=cosmos_sigma_max,
+            cosmos_sigma_min=cosmos_sigma_min,
+            sigma_start=sigma_start,
+        )
+
+    if flow_schedule == "flow_cosmos_rf_tail":
+        start_sigma_max = cosmos_sigma_max * flow_shift
         sigma_start = _rf_denoise_start_external_sigma(
             denoise,
             sigma_max=start_sigma_max,
             sigma_min=cosmos_sigma_min,
         )
-        return _build_flow_cosmos_sigmas(
+        return _build_flow_cosmos_rf_tail_sigmas(
             steps,
             flow_shift=flow_shift,
             cosmos_sigma_max=cosmos_sigma_max,
@@ -568,14 +622,12 @@ def _build_rf_denoise_sigmas(
             sigma_max=sigma_start,
             sigma_min=cosmos_sigma_min,
         )
-    if flow_schedule.startswith("flow_cosmos_rho7_rf_tail_"):
-        params = _rho_rf_tail_params(flow_schedule)
-        return build_flow_cosmos_rho_rf_tail_sigmas(
+    if flow_schedule == "flow_cosmos_rho7":
+        return _build_flow_cosmos_rho7_sigmas(
             steps,
-            order=7.0,
-            sigma_max=sigma_start,
-            sigma_min=cosmos_sigma_min,
-            **params,
+            flow_rho7_tail_auto=flow_rho7_tail_auto,
+            cosmos_sigma_max=sigma_start,
+            cosmos_sigma_min=cosmos_sigma_min,
         )
     raise ValueError(f"unsupported RF denoise flow_schedule: {flow_schedule}")
 
@@ -583,19 +635,10 @@ def _build_rf_denoise_sigmas(
 def _build_flow_cosmos_sigmas(
     steps: int,
     *,
-    flow_shift: float,
     cosmos_sigma_max: float,
     cosmos_sigma_min: float,
     sigma_start: float | None = None,
 ) -> list[float]:
-    if _flow_shift_is_active("flow_cosmos", flow_shift):
-        return build_flow_cosmos_shift_rf_tail_sigmas(
-            steps,
-            beta=float(flow_shift),
-            sigma_max=cosmos_sigma_max,
-            sigma_min=cosmos_sigma_min,
-            sigma_start=sigma_start,
-        )
     if sigma_start is not None:
         return _exact_logspace_rflow_sigmas(
             steps,
@@ -609,10 +652,45 @@ def _build_flow_cosmos_sigmas(
     )
 
 
-def _rho_rf_tail_params(flow_schedule: str) -> dict[str, float | None]:
-    if flow_schedule == "flow_cosmos_rho7_rf_tail_auto":
-        return {"tail_lambda_start": None, "tail_delta_ell_max": 0.5}
-    raise ValueError(f"unsupported rho7 RF-tail schedule: {flow_schedule}")
+def _build_flow_cosmos_rf_tail_sigmas(
+    steps: int,
+    *,
+    flow_shift: float,
+    cosmos_sigma_max: float,
+    cosmos_sigma_min: float,
+    sigma_start: float | None = None,
+) -> list[float]:
+    return build_flow_cosmos_shift_rf_tail_sigmas(
+        steps,
+        beta=float(flow_shift),
+        sigma_max=cosmos_sigma_max,
+        sigma_min=cosmos_sigma_min,
+        sigma_start=sigma_start,
+    )
+
+
+def _build_flow_cosmos_rho7_sigmas(
+    steps: int,
+    *,
+    flow_rho7_tail_auto: bool,
+    cosmos_sigma_max: float,
+    cosmos_sigma_min: float,
+) -> list[float]:
+    if flow_rho7_tail_auto:
+        return build_flow_cosmos_rho_rf_tail_sigmas(
+            steps,
+            order=7.0,
+            sigma_max=cosmos_sigma_max,
+            sigma_min=cosmos_sigma_min,
+            tail_lambda_start=None,
+            tail_delta_ell_max=0.5,
+        )
+    return build_flow_cosmos_rho_sigmas(
+        steps,
+        order=7.0,
+        sigma_max=cosmos_sigma_max,
+        sigma_min=cosmos_sigma_min,
+    )
 
 
 def _rf_denoise_start_external_sigma(
@@ -669,7 +747,15 @@ def _describe_model_sampling_shift(model: Any, *, flow_schedule: str) -> str:
         except (TypeError, ValueError):
             shift_text = str(shift)
         if class_name in {"ModelSamplingDiscreteFlow", "ModelSamplingFlux"}:
-            if flow_schedule.startswith("flow_cosmos"):
+            rf_linear_schedules = {
+                "flow_rf_linear_shift",
+                "flow_rf_linear_s_tail_shift5",
+            }
+            bypasses_native_shift = (
+                flow_schedule.startswith("flow_cosmos")
+                or flow_schedule in rf_linear_schedules
+            )
+            if bypasses_native_shift:
                 return f"{class_name}: native shift={shift_text} present, bypassed by {flow_schedule}"
             return f"{class_name}: native shift={shift_text} baked into sigmas"
         return f"{class_name}: shift={shift_text}"
@@ -692,9 +778,18 @@ def run_comfy_anima_sampler(
     flow_solver: str,
     flow_schedule: str,
     flow_shift: float,
+    flow_rho7_tail_auto: bool,
+    final_clean_pass: bool,
     flow_er_order: int,
     flow_pc3_gamma: float,
     flow_pc3_tolerance: float,
+    flow_unipc_order: int,
+    flow_unipc_solver_type: str,
+    flow_unipc_lower_order_final: bool,
+    flow_unipc_disable_corrector_first: int,
+    flow_unipc_thresholding: bool,
+    flow_unipc_dynamic_thresholding_ratio: float,
+    flow_unipc_sample_max_value: float,
     cosmos_sigma_max: float,
     cosmos_sigma_min: float,
     denoise_legacy_progress: bool,
@@ -720,7 +815,8 @@ def run_comfy_anima_sampler(
     rf_endpoint_noise_refresh_until: float,
     add_noise: bool,
     disable_pbar: bool,
-) -> tuple[dict[str, Any], str]:
+    collect_diagnostics: bool = False,
+) -> tuple[dict[str, Any], str] | tuple[dict[str, Any], str, str]:
     """Run the sampler through ComfyUI's standard sampling bridge."""
 
     if "samples" not in latent:
@@ -758,12 +854,14 @@ def run_comfy_anima_sampler(
     else:
         noise = torch.zeros_like(latent_image)
 
+    schedule_steps = int(steps) + int(bool(final_clean_pass))
     sigmas = build_anima_sigmas(
         model,
-        steps,
+        schedule_steps,
         denoise=denoise,
         flow_schedule=flow_schedule,
         flow_shift=flow_shift,
+        flow_rho7_tail_auto=flow_rho7_tail_auto,
         cosmos_sigma_max=cosmos_sigma_max,
         cosmos_sigma_min=cosmos_sigma_min,
         denoise_legacy_progress=denoise_legacy_progress,
@@ -781,9 +879,18 @@ def run_comfy_anima_sampler(
             "flow_solver": flow_solver,
             "flow_schedule": flow_schedule,
             "flow_shift": float(flow_shift),
+            "flow_rho7_tail_auto": bool(flow_rho7_tail_auto),
+            "final_clean_pass": bool(final_clean_pass),
             "flow_er_order": int(flow_er_order),
             "flow_pc3_gamma": float(flow_pc3_gamma),
             "flow_pc3_tolerance": float(flow_pc3_tolerance),
+            "flow_unipc_order": int(flow_unipc_order),
+            "flow_unipc_solver_type": str(flow_unipc_solver_type),
+            "flow_unipc_lower_order_final": bool(flow_unipc_lower_order_final),
+            "flow_unipc_disable_corrector_first": int(flow_unipc_disable_corrector_first),
+            "flow_unipc_thresholding": bool(flow_unipc_thresholding),
+            "flow_unipc_dynamic_thresholding_ratio": float(flow_unipc_dynamic_thresholding_ratio),
+            "flow_unipc_sample_max_value": float(flow_unipc_sample_max_value),
             "base_cfg": float(cfg),
             "cfg_schedule_domain": str(cfg_schedule_domain),
             "cfg_schedule_mode": str(cfg_schedule_mode),
@@ -806,10 +913,12 @@ def run_comfy_anima_sampler(
             "rf_endpoint_noise_refresh_strength": float(rf_endpoint_noise_refresh_strength),
             "rf_endpoint_noise_refresh_until": float(rf_endpoint_noise_refresh_until),
             "sampler_stats": sampler_stats,
+            "collect_diagnostics": bool(collect_diagnostics),
         },
     )
 
-    callback = latent_preview.prepare_callback(model, int(sigmas.shape[0]) - 1)
+    active_steps = _active_integration_steps(torch, sigmas, final_clean_pass=final_clean_pass)
+    callback = latent_preview.prepare_callback(model, active_steps)
     progress_disabled = disable_pbar or not comfy_utils.PROGRESS_BAR_ENABLED
 
     noise_mask = latent.get("noise_mask")
@@ -833,7 +942,7 @@ def run_comfy_anima_sampler(
     out.pop("downscale_ratio_temporal", None)
     out["samples"] = samples
 
-    actual_steps = int(sigmas.shape[0]) - 1
+    actual_steps = active_steps
     log = AnimaSamplerLog(
         requested_steps=steps,
         actual_steps=actual_steps,
@@ -845,6 +954,8 @@ def run_comfy_anima_sampler(
         sampler_core=flow_solver,
         flow_schedule=flow_schedule,
         flow_shift=float(flow_shift),
+        flow_rho7_tail_auto=bool(flow_rho7_tail_auto),
+        final_clean_pass=bool(final_clean_pass),
         cfg_schedule_mode=str(cfg_schedule_mode),
         cfg_schedule_domain=str(cfg_schedule_domain),
         denoise_legacy_progress=bool(denoise_legacy_progress),
@@ -932,6 +1043,8 @@ def run_comfy_anima_sampler(
         mean_gamma_pc3=_stats_mean(sampler_stats.get("gamma_pc3_values", [])),
         mean_gamma3=_stats_mean(sampler_stats.get("gamma3_values", [])),
     ).as_text()
+    if collect_diagnostics:
+        return out, log, format_sampler_trace_csv(sampler_stats)
     return out, log
 
 
@@ -1144,12 +1257,13 @@ def _shape_text(value: Any) -> str:
     return "[" + ", ".join(str(int(dim)) for dim in shape) + "]"
 
 
-def _init_sampler_stats(stats: dict[str, Any] | None) -> dict[str, Any]:
+def _init_sampler_stats(stats: dict[str, Any] | None, *, collect_trace: bool = False) -> dict[str, Any]:
     if stats is None:
         stats = {}
     stats.clear()
     stats.update(
         {
+            "collect_trace": bool(collect_trace),
             "model_calls": 0,
             "cache_candidates": 0,
             "cache_accepts": 0,
@@ -1164,12 +1278,165 @@ def _init_sampler_stats(stats: dict[str, Any] | None) -> dict[str, Any]:
             "gamma3_values": [],
         }
     )
+    if collect_trace:
+        stats["step_trace"] = []
     return stats
 
 
 def _record_model_call(stats: dict[str, Any] | None):
     if stats is not None:
         stats["model_calls"] = int(stats.get("model_calls", 0)) + 1
+
+
+def _sampler_trace_enabled(stats: dict[str, Any] | None) -> bool:
+    return bool(stats is not None and stats.get("collect_trace"))
+
+
+def _trace_float(torch, value) -> float | None:
+    if value is None:
+        return None
+    try:
+        if hasattr(value, "detach"):
+            if int(value.numel()) == 1:
+                return float(value.detach().float().cpu().item())
+            return float(_rms(torch, value).detach().float().cpu().item())
+        return float(value)
+    except (TypeError, ValueError, RuntimeError):
+        return None
+
+
+def _relative_rms(torch, left, right, *, eps: float = 1e-6) -> float | None:
+    if left is None or right is None:
+        return None
+    try:
+        return _scalar_float(torch, _rms(torch, left - right) / (_rms(torch, right) + eps))
+    except (TypeError, RuntimeError):
+        return None
+
+
+def _append_sampler_trace(
+    torch,
+    stats: dict[str, Any] | None,
+    *,
+    step_index: int,
+    total_steps: int,
+    solver: str,
+    phase: str,
+    t,
+    t_next,
+    cfg: float,
+    cfg_next: float | None,
+    x_before,
+    x_after,
+    denoised=None,
+    x_pred=None,
+    x_corrected=None,
+    cache_used: bool = False,
+    cache_score: float | None = None,
+    endpoint_call: bool = False,
+    predictor_order: int = 0,
+    corrector_order: int = 0,
+    gamma=None,
+    gamma3=None,
+    refresh_applied: bool = False,
+    model_calls_before: int | None = None,
+    note: str = "",
+) -> None:
+    if not _sampler_trace_enabled(stats):
+        return
+
+    lambda_current = _trace_float(torch, _rf_lambda(torch, t))
+    lambda_next = _trace_float(torch, _rf_lambda(torch, t_next))
+    trace = {
+        "step": int(step_index),
+        "total_steps": int(total_steps),
+        "solver": str(solver),
+        "phase": str(phase),
+        "t": _trace_float(torch, t),
+        "t_next": _trace_float(torch, t_next),
+        "lambda": lambda_current,
+        "lambda_next": lambda_next,
+        "lambda_gap": (
+            None
+            if lambda_current is None or lambda_next is None
+            else float(lambda_next - lambda_current)
+        ),
+        "cfg": float(cfg),
+        "cfg_next": None if cfg_next is None else float(cfg_next),
+        "model_calls_before": model_calls_before,
+        "model_calls_after": int(stats.get("model_calls", 0)),
+        "cache_used": bool(cache_used),
+        "cache_score": cache_score,
+        "endpoint_call": bool(endpoint_call),
+        "predictor_order": int(predictor_order),
+        "corrector_order": int(corrector_order),
+        "gamma_pc3": _trace_float(torch, gamma),
+        "gamma3": _trace_float(torch, gamma3),
+        "update_rel_rms": _relative_rms(torch, x_after, x_before),
+        "predictor_rel_rms": _relative_rms(torch, x_pred, x_before),
+        "accepted_vs_predictor_rel_rms": _relative_rms(torch, x_after, x_pred),
+        "correction_rel_rms": _relative_rms(torch, x_corrected, x_pred),
+        "denoised_rel_rms": _relative_rms(torch, denoised, x_before),
+        "refresh_applied": bool(refresh_applied),
+        "note": str(note),
+    }
+    stats.setdefault("step_trace", []).append(trace)
+
+
+def format_sampler_trace_csv(stats: dict[str, Any] | None) -> str:
+    if not stats:
+        return "step,total_steps,solver,phase,t,t_next,lambda,lambda_next,lambda_gap,cfg,cfg_next,model_calls_before,model_calls_after,cache_used,cache_score,endpoint_call,predictor_order,corrector_order,gamma_pc3,gamma3,update_rel_rms,predictor_rel_rms,accepted_vs_predictor_rel_rms,correction_rel_rms,denoised_rel_rms,refresh_applied,note"
+    rows = list(stats.get("step_trace", []))
+    columns = [
+        "step",
+        "total_steps",
+        "solver",
+        "phase",
+        "t",
+        "t_next",
+        "lambda",
+        "lambda_next",
+        "lambda_gap",
+        "cfg",
+        "cfg_next",
+        "model_calls_before",
+        "model_calls_after",
+        "cache_used",
+        "cache_score",
+        "endpoint_call",
+        "predictor_order",
+        "corrector_order",
+        "gamma_pc3",
+        "gamma3",
+        "update_rel_rms",
+        "predictor_rel_rms",
+        "accepted_vs_predictor_rel_rms",
+        "correction_rel_rms",
+        "denoised_rel_rms",
+        "refresh_applied",
+        "note",
+    ]
+    lines = [",".join(columns)]
+    for row in rows:
+        values = []
+        for key in columns:
+            value = row.get(key)
+            if value is None:
+                values.append("")
+            elif isinstance(value, bool):
+                values.append("1" if value else "0")
+            elif isinstance(value, float):
+                values.append(f"{value:.8g}")
+            else:
+                text = str(value).replace('"', '""')
+                values.append(f'"{text}"' if "," in text or "\n" in text else text)
+        lines.append(",".join(values))
+    return "\n".join(lines)
+
+
+def format_sampler_trace_json(stats: dict[str, Any] | None) -> str:
+    rows = [] if not stats else list(stats.get("step_trace", []))
+    return json.dumps(rows, ensure_ascii=True, indent=2)
 
 
 def _stats_mean(values: list[float]) -> float | None:
@@ -1184,13 +1451,6 @@ def _stats_percentile(values: list[float], percentile: float) -> float | None:
     ordered = sorted(float(value) for value in values)
     index = int(round((len(ordered) - 1) * max(0.0, min(100.0, percentile)) / 100.0))
     return float(ordered[index])
-
-
-def _reset_fsal_cache(state: FlowFSALCacheState):
-    state.clear_pending()
-    state.consecutive_reuse = 0
-    state.steps_since_fresh = 0
-    state.force_next_order_le_2 = True
 
 
 def _model_current_denoised(
@@ -1215,106 +1475,6 @@ def _model_current_denoised(
     return _restore_sampler_channels(denoised, x)
 
 
-def _try_use_fsal_cache(
-    torch,
-    cache_state: FlowFSALCacheState,
-    t,
-    *,
-    step_index: int,
-    total_steps: int,
-    force_fresh: bool,
-    stats: dict[str, Any] | None,
-    eps: float = 1e-6,
-):
-    if force_fresh:
-        if cache_state.pending_denoised is not None and stats is not None:
-            stats["forced_refresh_count"] = int(stats.get("forced_refresh_count", 0)) + 1
-        return None, False, None
-    if cache_state.pending_denoised is None or cache_state.pending_t is None:
-        return None, False, None
-    if step_index >= total_steps - 2:
-        return None, False, None
-    if cache_state.consecutive_reuse >= 3 or cache_state.steps_since_fresh >= 4:
-        return None, False, None
-
-    t_current = _scalar_float(torch, t)
-    t_cached = _scalar_float(torch, cache_state.pending_t)
-    if abs(t_current - t_cached) > eps:
-        return None, False, None
-
-    cached = cache_state.pending_denoised
-    score = cache_state.pending_score
-    cache_state.clear_pending()
-    cache_state.consecutive_reuse += 1
-    cache_state.steps_since_fresh += 1
-    if stats is not None:
-        stats["cache_accepts"] = int(stats.get("cache_accepts", 0)) + 1
-    return cached, True, score
-
-
-def _mark_fresh_current(cache_state: FlowFSALCacheState):
-    cache_state.clear_pending()
-    cache_state.consecutive_reuse = 0
-    cache_state.steps_since_fresh = 0
-
-
-def _pc3_fsal_cache_score(
-    torch,
-    *,
-    x_pred,
-    x_next,
-    x_heun,
-    x_am3,
-    t_next,
-    tolerance: float,
-    eps: float = 1e-6,
-) -> tuple[float, float, float]:
-    den_x = torch.maximum(_rms(torch, x_next), _rms(torch, x_heun)) + eps
-    e_x = _rms(torch, x_next - x_pred) / den_x
-    e_pc3 = _rms(torch, x_am3 - x_heun) / (_rms(torch, x_heun) + eps)
-
-    sqrt_t = math.sqrt(max(0.0, min(1.0, _scalar_float(torch, t_next))))
-    tau_x = 0.0012 + 0.0038 * sqrt_t
-    tau_pc3 = max(0.0, float(tolerance)) * (0.75 + 2.0 * sqrt_t)
-    if tau_pc3 <= 0.0:
-        return math.inf, _scalar_float(torch, e_x), _scalar_float(torch, e_pc3)
-
-    score = max(
-        _scalar_float(torch, e_x) / tau_x,
-        _scalar_float(torch, e_pc3) / tau_pc3,
-    )
-    return float(score), _scalar_float(torch, e_x), _scalar_float(torch, e_pc3)
-
-
-def _store_fsal_candidate(
-    torch,
-    cache_state: FlowFSALCacheState,
-    *,
-    denoised_next,
-    t_next,
-    score: float,
-    e_x: float,
-    step_index: int,
-    total_steps: int,
-    next_is_boundary: bool,
-    stats: dict[str, Any] | None,
-):
-    if stats is not None:
-        stats["cache_candidates"] = int(stats.get("cache_candidates", 0)) + 1
-        stats.setdefault("cache_scores", []).append(float(score))
-
-    if score < 1.0 and step_index < total_steps - 3 and not next_is_boundary:
-        cache_state.pending_denoised = denoised_next
-        cache_state.pending_t = t_next
-        cache_state.pending_score = float(score)
-        cache_state.pending_e_x = float(e_x)
-        return
-
-    cache_state.clear_pending()
-    if stats is not None:
-        stats["cache_rejects"] = int(stats.get("cache_rejects", 0)) + 1
-
-
 def sample_anima_flow_corrective(
     model: Any,
     x,
@@ -1326,9 +1486,18 @@ def sample_anima_flow_corrective(
     flow_solver: str,
     flow_schedule: str,
     flow_shift: float = 1.0,
+    flow_rho7_tail_auto: bool = False,
+    final_clean_pass: bool = True,
     flow_er_order: int,
     flow_pc3_gamma: float,
     flow_pc3_tolerance: float,
+    flow_unipc_order: int = 2,
+    flow_unipc_solver_type: str = "bh2",
+    flow_unipc_lower_order_final: bool = True,
+    flow_unipc_disable_corrector_first: int = 0,
+    flow_unipc_thresholding: bool = False,
+    flow_unipc_dynamic_thresholding_ratio: float = 0.995,
+    flow_unipc_sample_max_value: float = 1.0,
     base_cfg: float,
     cfg_schedule_domain: str,
     cfg_schedule_mode: str,
@@ -1351,6 +1520,7 @@ def sample_anima_flow_corrective(
     rf_endpoint_noise_refresh_strength: float,
     rf_endpoint_noise_refresh_until: float,
     sampler_stats: dict[str, Any] | None = None,
+    collect_diagnostics: bool = False,
 ):
     """ComfyUI ``KSAMPLER`` function implementing Flow Matching solvers.
 
@@ -1364,7 +1534,7 @@ def sample_anima_flow_corrective(
     torch = importlib.import_module("torch")
     k_sampling = importlib.import_module("comfy.k_diffusion.sampling")
 
-    total_steps = int(sigmas.shape[0]) - 1
+    total_steps = _active_integration_steps(torch, sigmas, final_clean_pass=final_clean_pass)
     if total_steps <= 0:
         return x
 
@@ -1383,18 +1553,15 @@ def sample_anima_flow_corrective(
 
     er_state = FlowERState()
     pc3_state = FlowPC3State()
-    fsal_cache_state = FlowFSALCacheState()
-    stats = _init_sampler_stats(sampler_stats)
+    unipc_state = FlowUniPC2State()
+    stats = _init_sampler_stats(sampler_stats, collect_trace=collect_diagnostics)
     hybrid_tail_start_step = _hybrid_tail_start_step(
         torch,
         sigmas,
         flow_schedule,
         flow_shift=flow_shift,
+        flow_rho7_tail_auto=flow_rho7_tail_auto,
     )
-    sparse_pc3_budget = _sparse_pc3_budget(total_steps)
-    sparse_pc3_used = {"high": 0, "body": 0, "tail": 0}
-    sparse_last_pc3_step = -999
-
     try:
         for step_index in k_sampling.trange(total_steps, disable=disable):
             comfy_sigma = sigmas[step_index]
@@ -1406,8 +1573,7 @@ def sample_anima_flow_corrective(
             if hybrid_tail_start_step is not None and step_index == hybrid_tail_start_step:
                 er_state = FlowERState()
                 pc3_state = FlowPC3State()
-                _reset_fsal_cache(fsal_cache_state)
-                sparse_last_pc3_step = -999
+                unipc_state = FlowUniPC2State()
             cfg_position = cfg_schedule_position(
                 torch,
                 t,
@@ -1443,37 +1609,20 @@ def sample_anima_flow_corrective(
                 print("[comfyui-anima-sampler] Dynamic CFG unavailable; using static CFG.")
                 warned_cfg = True
 
+            model_calls_before_step = int(stats.get("model_calls", 0)) if stats is not None else None
             t_for_model = t
-            fsal_enabled = flow_solver in {
-                "flow_pc3_fsal_gated",
-                "flow_3m_sparse_pc3_fsal",
-            }
-            force_fresh_current = (
-                not fsal_enabled
-                or step_index >= total_steps - 2
-                or (hybrid_tail_start_step is not None and step_index == hybrid_tail_start_step)
-            )
-            denoised, used_cached_denoised, cache_score = _try_use_fsal_cache(
-                torch,
-                fsal_cache_state,
+            used_cached_denoised = False
+            cache_score = None
+            denoised = _model_current_denoised(
+                model,
+                x,
                 t_for_model,
-                step_index=step_index,
-                total_steps=total_steps,
-                force_fresh=force_fresh_current,
+                s_in,
+                denoise_mask=denoise_mask,
+                model_options=model_options,
+                seed=seed,
                 stats=stats,
             )
-            if denoised is None:
-                denoised = _model_current_denoised(
-                    model,
-                    x,
-                    t_for_model,
-                    s_in,
-                    denoise_mask=denoise_mask,
-                    model_options=model_options,
-                    seed=seed,
-                    stats=stats,
-                )
-                _mark_fresh_current(fsal_cache_state)
 
             if callback is not None:
                 callback(
@@ -1485,20 +1634,29 @@ def sample_anima_flow_corrective(
                         "rf_t_hat": t_for_model,
                         "denoised": denoised,
                         "x": x,
-                        "fsal_cached": used_cached_denoised,
                     }
                 )
 
             x_step_start = x
-            if flow_solver == "flow_er":
-                x, er_state = flow_er_step(
-                    x,
-                    denoised,
-                    t_for_model,
-                    t_next,
-                    state=er_state,
-                    max_order=flow_er_order,
-                )
+            trace_phase = _sampler_trace_phase(step_index, total_steps, hybrid_tail_start_step)
+            if flow_solver == "flow_er" or flow_solver == "flow_ab2":
+                if flow_solver == "flow_ab2":
+                    x, er_state = flow_ab2_step(
+                        x,
+                        denoised,
+                        t_for_model,
+                        t_next,
+                        state=er_state,
+                    )
+                else:
+                    x, er_state = flow_er_step(
+                        x,
+                        denoised,
+                        t_for_model,
+                        t_next,
+                        state=er_state,
+                        max_order=flow_er_order,
+                    )
                 x, refresh_applied = rf_endpoint_noise_refresh(
                     torch,
                     x,
@@ -1513,6 +1671,27 @@ def sample_anima_flow_corrective(
                 )
                 if refresh_applied:
                     er_state = FlowERState()
+                _append_sampler_trace(
+                    torch,
+                    stats,
+                    step_index=step_index,
+                    total_steps=total_steps,
+                    solver=flow_solver,
+                    phase=trace_phase,
+                    t=t_for_model,
+                    t_next=t_next,
+                    cfg=cfg_step,
+                    cfg_next=None,
+                    x_before=x_step_start,
+                    x_after=x,
+                    denoised=denoised,
+                    cache_used=used_cached_denoised,
+                    cache_score=cache_score,
+                    endpoint_call=False,
+                    predictor_order=2 if flow_solver == "flow_ab2" and er_state.previous_previous_denoised is not None else 1,
+                    refresh_applied=refresh_applied,
+                    model_calls_before=model_calls_before_step,
+                )
                 continue
 
             if flow_solver == "flow_3m_damped":
@@ -1524,9 +1703,8 @@ def sample_anima_flow_corrective(
                     state=er_state,
                     max_gamma=flow_pc3_gamma,
                     tolerance=flow_pc3_tolerance,
-                    force_order_le_2=fsal_cache_state.force_next_order_le_2,
+                    force_order_le_2=False,
                 )
-                fsal_cache_state.force_next_order_le_2 = False
                 er_state = result_3m.state
                 if stats is not None:
                     stats.setdefault("gamma3_values", []).append(_scalar_float(torch, result_3m.gamma3))
@@ -1544,11 +1722,92 @@ def sample_anima_flow_corrective(
                 )
                 if refresh_applied:
                     er_state = FlowERState()
+                _append_sampler_trace(
+                    torch,
+                    stats,
+                    step_index=step_index,
+                    total_steps=total_steps,
+                    solver=flow_solver,
+                    phase=trace_phase,
+                    t=t_for_model,
+                    t_next=t_next,
+                    cfg=cfg_step,
+                    cfg_next=None,
+                    x_before=x_step_start,
+                    x_after=x,
+                    denoised=denoised,
+                    x_pred=result_3m.x,
+                    cache_used=used_cached_denoised,
+                    cache_score=cache_score,
+                    endpoint_call=False,
+                    predictor_order=int(result_3m.order),
+                    gamma3=result_3m.gamma3,
+                    refresh_applied=refresh_applied,
+                    model_calls_before=model_calls_before_step,
+                )
+                continue
+
+            if flow_solver == "flow_unipc2_x0":
+                unipc_result = flow_unipc2_x0_step(
+                    x,
+                    denoised,
+                    t_for_model,
+                    t_next,
+                    state=unipc_state,
+                    step_index=step_index,
+                    total_steps=total_steps,
+                    solver_order=flow_unipc_order,
+                    solver_type=flow_unipc_solver_type,
+                    lower_order_final=flow_unipc_lower_order_final,
+                    disable_corrector=tuple(range(max(0, int(flow_unipc_disable_corrector_first)))),
+                    thresholding=flow_unipc_thresholding,
+                    dynamic_thresholding_ratio=flow_unipc_dynamic_thresholding_ratio,
+                    sample_max_value=flow_unipc_sample_max_value,
+                )
+                unipc_state = unipc_result.state
+                x, refresh_applied = rf_endpoint_noise_refresh(
+                    torch,
+                    unipc_result.x,
+                    x_step_start,
+                    denoised,
+                    t_for_model,
+                    t_next,
+                    generator,
+                    enabled=rf_endpoint_noise_refresh_enabled,
+                    refresh_strength=rf_endpoint_noise_refresh_strength,
+                    refresh_until=rf_endpoint_noise_refresh_until,
+                )
+                if refresh_applied:
+                    unipc_state = FlowUniPC2State()
+                _append_sampler_trace(
+                    torch,
+                    stats,
+                    step_index=step_index,
+                    total_steps=total_steps,
+                    solver=flow_solver,
+                    phase=trace_phase,
+                    t=t_for_model,
+                    t_next=t_next,
+                    cfg=cfg_step,
+                    cfg_next=None,
+                    x_before=x_step_start,
+                    x_after=x,
+                    denoised=denoised,
+                    x_pred=unipc_result.x_predictor,
+                    x_corrected=unipc_result.x,
+                    cache_used=used_cached_denoised,
+                    cache_score=cache_score,
+                    endpoint_call=False,
+                    predictor_order=int(unipc_result.predictor_order),
+                    corrector_order=int(unipc_result.corrector_order),
+                    refresh_applied=refresh_applied,
+                    model_calls_before=model_calls_before_step,
+                )
                 continue
 
             if flow_solver == "flow_euler" or float(t_next) <= 0.0:
                 x_det = flow_euler_step(x, denoised, t_for_model, t_next)
-                x, _refresh_applied = rf_endpoint_noise_refresh(
+                x, refresh_applied = rf_endpoint_noise_refresh(
                     torch,
                     x_det,
                     x,
@@ -1560,51 +1819,109 @@ def sample_anima_flow_corrective(
                     refresh_strength=rf_endpoint_noise_refresh_strength,
                     refresh_until=rf_endpoint_noise_refresh_until,
                 )
-                continue
-
-            if flow_solver not in {
-                "flow_heun",
-                "flow_pc3_damped",
-                "flow_pc3_fsal_gated",
-                "flow_3m_sparse_pc3_fsal",
-            }:
-                raise ValueError(f"unsupported flow_solver: {flow_solver}")
-
-            sparse_3m_result = None
-            sparse_phase = _sparse_pc3_phase(step_index, total_steps, hybrid_tail_start_step)
-            sparse_risk = 0.0
-            if flow_solver == "flow_3m_sparse_pc3_fsal":
-                sparse_3m_result = flow_3m_damped_step(
-                    x,
-                    denoised,
-                    t_for_model,
-                    t_next,
-                    state=er_state,
-                    max_gamma=flow_pc3_gamma,
-                    tolerance=flow_pc3_tolerance,
-                    force_order_le_2=fsal_cache_state.force_next_order_le_2 or bool(used_cached_denoised),
-                )
-                fsal_cache_state.force_next_order_le_2 = False
-                x_pred = sparse_3m_result.x
-                sparse_risk = _sparse_pc3_risk(
+                _append_sampler_trace(
                     torch,
-                    denoised=denoised,
+                    stats,
+                    step_index=step_index,
+                    total_steps=total_steps,
+                    solver=flow_solver,
+                    phase=trace_phase,
                     t=t_for_model,
                     t_next=t_next,
-                    state=er_state,
-                    result=sparse_3m_result,
-                    tolerance=flow_pc3_tolerance,
+                    cfg=cfg_step,
+                    cfg_next=None,
+                    x_before=x_step_start,
+                    x_after=x,
+                    denoised=denoised,
+                    x_pred=x_det,
+                    cache_used=used_cached_denoised,
+                    cache_score=cache_score,
+                    endpoint_call=False,
+                    predictor_order=1,
+                    refresh_applied=refresh_applied,
+                    model_calls_before=model_calls_before_step,
+                    note=(
+                        "pc3_terminal"
+                        if flow_solver == "flow_pc3_damped" and float(t_next) <= 0.0
+                        else ""
+                    ),
                 )
-            elif flow_solver in {"flow_pc3_damped", "flow_pc3_fsal_gated"}:
-                x_pred = flow_pc3_predictor_step(
+                continue
+
+            if flow_solver not in {"flow_heun", "flow_pc3_damped"}:
+                raise ValueError(f"unsupported flow_solver: {flow_solver}")
+
+            x_pred_order = 1
+            if flow_solver == "flow_pc3_damped":
+                predictor_result = flow_pc3_predictor_step_result(
                     x,
                     denoised,
                     t_for_model,
                     t_next,
                     state=pc3_state,
+                    max_order=_flow_pc3_predictor_max_order(step_index, total_steps),
                 )
+                x_pred = predictor_result.x
+                x_pred_order = int(predictor_result.order)
             else:
                 x_pred = flow_euler_step(x, denoised, t_for_model, t_next)
+
+            if flow_solver == "flow_pc3_damped" and not _flow_pc3_should_endpoint_correct(
+                torch,
+                pc3_state,
+                x_pred_order,
+                step_index,
+                total_steps,
+                t_next,
+            ):
+                skip_note = _flow_pc3_endpoint_skip_note(
+                    torch,
+                    pc3_state,
+                    x_pred_order,
+                    step_index,
+                    total_steps,
+                    t_next,
+                )
+                pc3_state = _flow_pc3_next_state(torch, pc3_state, denoised, t_for_model)
+                x, refresh_applied = rf_endpoint_noise_refresh(
+                    torch,
+                    x_pred,
+                    x_step_start,
+                    denoised,
+                    t_for_model,
+                    t_next,
+                    generator,
+                    enabled=rf_endpoint_noise_refresh_enabled,
+                    refresh_strength=rf_endpoint_noise_refresh_strength,
+                    refresh_until=rf_endpoint_noise_refresh_until,
+                )
+                if refresh_applied:
+                    pc3_state = FlowPC3State()
+                _append_sampler_trace(
+                    torch,
+                    stats,
+                    step_index=step_index,
+                    total_steps=total_steps,
+                    solver=flow_solver,
+                    phase=trace_phase,
+                    t=t_for_model,
+                    t_next=t_next,
+                    cfg=cfg_step,
+                    cfg_next=None,
+                    x_before=x_step_start,
+                    x_after=x,
+                    denoised=denoised,
+                    x_pred=x_pred,
+                    cache_used=used_cached_denoised,
+                    cache_score=cache_score,
+                    endpoint_call=False,
+                    predictor_order=x_pred_order,
+                    refresh_applied=refresh_applied,
+                    model_calls_before=model_calls_before_step,
+                    note=skip_note,
+                )
+                continue
+
             cfg_next_position = cfg_schedule_position(
                 torch,
                 t_next,
@@ -1636,48 +1953,6 @@ def sample_anima_flow_corrective(
             if can_set_cfg:
                 _set_cfg(cfg_guider, cfg_next)
 
-            if flow_solver == "flow_3m_sparse_pc3_fsal":
-                do_endpoint_pc3 = _should_do_sparse_pc3(
-                    step_index,
-                    total_steps,
-                    phase=sparse_phase,
-                    risk=sparse_risk,
-                    used=sparse_pc3_used,
-                    budget=sparse_pc3_budget,
-                    last_pc3_step=sparse_last_pc3_step,
-                    tail_start_step=hybrid_tail_start_step,
-                )
-                if not do_endpoint_pc3:
-                    if used_cached_denoised:
-                        fsal_cache_state.force_next_order_le_2 = True
-                    else:
-                        er_state = sparse_3m_result.state
-                        pc3_state = FlowPC3State(
-                            previous_denoised=denoised,
-                            previous_lambda=_rf_lambda(torch, t_for_model),
-                        )
-                    if stats is not None:
-                        stats.setdefault("gamma3_values", []).append(_scalar_float(torch, sparse_3m_result.gamma3))
-                    fsal_cache_state.clear_pending()
-                    x, refresh_applied = rf_endpoint_noise_refresh(
-                        torch,
-                        x_pred,
-                        x_step_start,
-                        denoised,
-                        t_for_model,
-                        t_next,
-                        generator,
-                        enabled=rf_endpoint_noise_refresh_enabled,
-                        refresh_strength=rf_endpoint_noise_refresh_strength,
-                        refresh_until=rf_endpoint_noise_refresh_until,
-                    )
-                    if refresh_applied:
-                        er_state = FlowERState()
-                        pc3_state = FlowPC3State()
-                        _reset_fsal_cache(fsal_cache_state)
-                        sparse_last_pc3_step = -999
-                    continue
-
             denoised_next = model(
                 x_pred,
                 t_next * s_in,
@@ -1687,14 +1962,14 @@ def sample_anima_flow_corrective(
             )
             _record_model_call(stats)
             denoised_next = _restore_sampler_channels(denoised_next, x_pred)
+            trace_x_corrected = None
+            trace_gamma_pc3 = None
+            trace_corrector_order = 0
             if flow_solver == "flow_heun":
                 x_det = flow_heun_step(x, denoised, denoised_next, t_for_model, t_next)
-            elif flow_solver in {
-                "flow_pc3_damped",
-                "flow_pc3_fsal_gated",
-                "flow_3m_sparse_pc3_fsal",
-            }:
-                pc3_state_before_step = pc3_state
+                trace_x_corrected = x_det
+                trace_corrector_order = 1
+            elif flow_solver == "flow_pc3_damped":
                 pc3_result = flow_pc3_damped_step_result(
                     x,
                     denoised,
@@ -1704,24 +1979,18 @@ def sample_anima_flow_corrective(
                     state=pc3_state,
                     max_gamma=flow_pc3_gamma,
                     tolerance=flow_pc3_tolerance,
+                    x_pred=x_pred,
+                    predictor_order=x_pred_order,
                 )
                 x_det = pc3_result.x
-                if used_cached_denoised:
-                    pc3_state = pc3_state_before_step
-                    fsal_cache_state.force_next_order_le_2 = True
-                else:
-                    pc3_state = pc3_result.state
+                trace_x_corrected = pc3_result.x_corrected
+                trace_gamma_pc3 = pc3_result.gamma
+                trace_corrector_order = int(pc3_result.corrector_order)
+                pc3_state = pc3_result.state
                 if stats is not None:
                     stats["pc3_used_total"] = int(stats.get("pc3_used_total", 0)) + 1
-                    stats[f"pc3_used_{sparse_phase}"] = int(stats.get(f"pc3_used_{sparse_phase}", 0)) + 1
+                    stats[f"pc3_used_{trace_phase}"] = int(stats.get(f"pc3_used_{trace_phase}", 0)) + 1
                     stats.setdefault("gamma_pc3_values", []).append(_scalar_float(torch, pc3_result.gamma))
-                if flow_solver == "flow_3m_sparse_pc3_fsal":
-                    if not used_cached_denoised:
-                        er_state = sparse_3m_result.state
-                    sparse_pc3_used[sparse_phase] += 1
-                    sparse_last_pc3_step = step_index
-                    if stats is not None:
-                        stats.setdefault("gamma3_values", []).append(_scalar_float(torch, sparse_3m_result.gamma3))
             else:
                 raise ValueError(f"unsupported flow_solver: {flow_solver}")
             x, refresh_applied = rf_endpoint_noise_refresh(
@@ -1736,38 +2005,93 @@ def sample_anima_flow_corrective(
                 refresh_strength=rf_endpoint_noise_refresh_strength,
                 refresh_until=rf_endpoint_noise_refresh_until,
             )
-            if flow_solver in {"flow_pc3_damped", "flow_pc3_fsal_gated", "flow_3m_sparse_pc3_fsal"} and refresh_applied:
+            if flow_solver == "flow_pc3_damped" and refresh_applied:
                 pc3_state = FlowPC3State()
-                if flow_solver == "flow_3m_sparse_pc3_fsal":
-                    er_state = FlowERState()
-                    sparse_last_pc3_step = -999
-                _reset_fsal_cache(fsal_cache_state)
-            elif flow_solver in {"flow_pc3_fsal_gated", "flow_3m_sparse_pc3_fsal"}:
-                next_is_boundary = (
-                    hybrid_tail_start_step is not None
-                    and step_index + 1 == hybrid_tail_start_step
-                )
-                score, e_x, _e_pc3 = _pc3_fsal_cache_score(
-                    torch,
-                    x_pred=x_pred,
-                    x_next=x,
-                    x_heun=pc3_result.x_heun,
-                    x_am3=pc3_result.x_am3,
-                    t_next=t_next,
-                    tolerance=flow_pc3_tolerance,
-                )
-                _store_fsal_candidate(
-                    torch,
-                    fsal_cache_state,
-                    denoised_next=denoised_next,
-                    t_next=t_next,
-                    score=score,
-                    e_x=e_x,
-                    step_index=step_index,
-                    total_steps=total_steps,
-                    next_is_boundary=next_is_boundary,
-                    stats=stats,
-                )
+            _append_sampler_trace(
+                torch,
+                stats,
+                step_index=step_index,
+                total_steps=total_steps,
+                solver=flow_solver,
+                phase=trace_phase,
+                t=t_for_model,
+                t_next=t_next,
+                cfg=cfg_step,
+                cfg_next=cfg_next,
+                x_before=x_step_start,
+                x_after=x,
+                denoised=denoised,
+                x_pred=x_pred,
+                x_corrected=trace_x_corrected,
+                cache_used=used_cached_denoised,
+                cache_score=cache_score,
+                endpoint_call=True,
+                predictor_order=x_pred_order,
+                corrector_order=trace_corrector_order,
+                gamma=trace_gamma_pc3,
+                gamma3=None,
+                refresh_applied=refresh_applied,
+                model_calls_before=model_calls_before_step,
+            )
+
+        if final_clean_pass:
+            cfg_clean = cfg_at_progress(
+                1.0,
+                base_cfg=base_cfg,
+                cfg_schedule_mode=cfg_schedule_mode,
+                early_cfg_boost=early_cfg_boost,
+                early_cfg_until=early_cfg_until,
+                late_cfg_scale=late_cfg_scale,
+                late_cfg_start=late_cfg_start,
+                cfg_early_scale=cfg_early_scale,
+                cfg_early_ramp_end=cfg_early_ramp_end,
+                cfg_peak_boost=cfg_peak_boost,
+                cfg_bump_start=cfg_bump_start,
+                cfg_bump_end=cfg_bump_end,
+                cfg_beta_alpha=cfg_beta_alpha,
+                cfg_beta_beta=cfg_beta_beta,
+                cfg_interval_start=cfg_interval_start,
+                cfg_interval_rise_end=cfg_interval_rise_end,
+                cfg_interval_fall_start=cfg_interval_fall_start,
+                cfg_interval_end=cfg_interval_end,
+            )
+            if can_set_cfg:
+                _set_cfg(cfg_guider, cfg_clean)
+            clean_sigma = sigmas[total_steps] if total_steps < int(sigmas.shape[0]) else _finite_schedule_terminal(torch, sigmas)
+            clean_x_before = x
+            clean_calls_before = int(stats.get("model_calls", 0)) if stats is not None else None
+            x = _model_current_denoised(
+                model,
+                x,
+                clean_sigma,
+                s_in,
+                denoise_mask=denoise_mask,
+                model_options=model_options,
+                seed=seed,
+                stats=stats,
+            )
+            _append_sampler_trace(
+                torch,
+                stats,
+                step_index=total_steps,
+                total_steps=total_steps,
+                solver=flow_solver,
+                phase="clean",
+                t=clean_sigma,
+                t_next=clean_sigma,
+                cfg=cfg_clean,
+                cfg_next=None,
+                x_before=clean_x_before,
+                x_after=x,
+                denoised=x,
+                x_pred=x,
+                cache_used=False,
+                endpoint_call=True,
+                predictor_order=0,
+                corrector_order=0,
+                model_calls_before=clean_calls_before,
+                note="final_clean_pass",
+            )
     finally:
         if can_set_cfg and original_cfg is not None:
             _set_cfg(cfg_guider, original_cfg)
@@ -1785,6 +2109,34 @@ def flow_euler_step(x, denoised, t, t_next):
 
     velocity = flow_velocity(x, denoised, t)
     return x + (t_next - t) * velocity
+
+
+def flow_ab2_step(
+    x,
+    denoised,
+    t,
+    t_next,
+    *,
+    state: FlowERState | None = None,
+    eps: float = 1e-6,
+):
+    """Advance one RF x0 Adams-Bashforth 2 step.
+
+    Cosmos' AB2 scheduler stores the previous x0 prediction and integrates in
+    ``-log(sigma)``. Our schedules pass normalized RF time ``t`` to the model,
+    whose external sigma ratio is ``t / (1 - t)``; ``_rf_lambda`` is therefore
+    the same log-sigma time variable. The first step falls back to Euler.
+    """
+
+    return flow_er_step(
+        x,
+        denoised,
+        t,
+        t_next,
+        state=state,
+        max_order=2,
+        eps=eps,
+    )
 
 
 def rf_endpoint_noise_refresh(
@@ -1865,14 +2217,38 @@ def flow_pc3_predictor_step(
     t_next,
     *,
     state: FlowPC3State | None = None,
+    max_order: int = 3,
     eps: float = 1e-6,
 ):
-    """Predict an RF PC3 endpoint using AB2 history when it is valid."""
+    """Predict an RF PC3 endpoint with internal P1/P2/P3 warmup."""
+
+    return flow_pc3_predictor_step_result(
+        x,
+        denoised,
+        t,
+        t_next,
+        state=state,
+        max_order=max_order,
+        eps=eps,
+    ).x
+
+
+def flow_pc3_predictor_step_result(
+    x,
+    denoised,
+    t,
+    t_next,
+    *,
+    state: FlowPC3State | None = None,
+    max_order: int = 3,
+    eps: float = 1e-6,
+) -> FlowPC3PredictorResult:
+    """Predict an RF PC3 endpoint and report the accepted predictor order."""
 
     if float(t_next) <= 0.0:
-        return denoised
+        return FlowPC3PredictorResult(denoised, 1)
     if float(t) <= 0.0:
-        return denoised
+        return FlowPC3PredictorResult(denoised, 1)
 
     torch = importlib.import_module("torch")
     t_current = torch.clamp(_as_tensor_like(torch, t, x), min=eps)
@@ -1880,26 +2256,187 @@ def flow_pc3_predictor_step(
     current_lambda = _rf_lambda(torch, t, eps=eps)
     lambda_next = _rf_lambda(torch, t_next, eps=eps)
     h = lambda_next - current_lambda
+    h_f = _scalar_float(torch, h)
     ratio = t_next_tensor / t_current
 
-    if _scalar_float(torch, h) <= eps:
-        return ratio * x + (1.0 - ratio) * denoised
-
-    if state is None or state.previous_denoised is None or state.previous_lambda is None:
-        return ratio * x + (1.0 - ratio) * denoised
-
-    h_previous = current_lambda - state.previous_lambda
-    if _scalar_float(torch, h_previous) <= eps:
-        return ratio * x + (1.0 - ratio) * denoised
+    if h_f <= eps:
+        return FlowPC3PredictorResult(ratio * x + (1.0 - ratio) * denoised, 1)
 
     c = t_next_tensor * torch.exp(current_lambda)
     k0 = torch.expm1(h)
     k1 = torch.exp(h) * h - k0
+    x_p1 = ratio * x + c * k0 * denoised
+
+    max_order = max(1, min(3, int(max_order)))
+    if max_order <= 1:
+        return FlowPC3PredictorResult(x_p1, 1)
+
+    if state is None or state.previous_denoised is None or state.previous_lambda is None:
+        return FlowPC3PredictorResult(x_p1, 1)
+
+    h_previous = current_lambda - state.previous_lambda
+    h_previous_f = _scalar_float(torch, h_previous)
+    if h_previous_f <= eps:
+        return FlowPC3PredictorResult(x_p1, 1)
+
     current_weight = k0 + k1 / h_previous
     previous_weight = -k1 / h_previous
-    return ratio * x + c * (
+    x_p2 = ratio * x + c * (
         current_weight * denoised + previous_weight * state.previous_denoised
     )
+
+    if max_order <= 2:
+        return FlowPC3PredictorResult(x_p2, 2)
+
+    if state.previous_previous_denoised is None or state.previous_previous_lambda is None:
+        return FlowPC3PredictorResult(x_p2, 2)
+
+    h_previous_previous = state.previous_lambda - state.previous_previous_lambda
+    h_previous_previous_f = _scalar_float(torch, h_previous_previous)
+    if h_previous_previous_f <= eps:
+        return FlowPC3PredictorResult(x_p2, 2)
+
+    r1 = h_f / h_previous_f
+    r2 = h_previous_f / h_previous_previous_f
+    k2 = torch.exp(h) * h * h - 2.0 * k1
+    a = h_previous
+    b = h_previous + h_previous_previous
+    weight_current = k0 + ((a + b) / (a * b)) * k1 + k2 / (a * b)
+    weight_previous = -(k2 + b * k1) / (a * (b - a))
+    weight_previous_previous = (k2 + a * k1) / (b * (b - a))
+    coeff_l1 = _scalar_float(
+        torch,
+        (
+            torch.abs(weight_current)
+            + torch.abs(weight_previous)
+            + torch.abs(weight_previous_previous)
+        )
+        / (torch.abs(k0) + eps),
+    )
+
+    if not (0.50 <= r1 <= 2.00 and 0.50 <= r2 <= 2.00) or h_f > 0.55 or coeff_l1 > 5.0:
+        return FlowPC3PredictorResult(x_p2, 2)
+
+    return FlowPC3PredictorResult(
+        ratio * x
+        + c
+        * (
+            weight_current * denoised
+            + weight_previous * state.previous_denoised
+            + weight_previous_previous * state.previous_previous_denoised
+        ),
+        3,
+    )
+
+
+def _flow_pc3_next_state(torch, state: FlowPC3State | None, denoised, t, *, eps: float = 1e-6):
+    current_lambda = _rf_lambda(torch, t, eps=eps)
+    if state is None:
+        state = FlowPC3State()
+    return FlowPC3State(
+        previous_denoised=denoised,
+        previous_lambda=current_lambda,
+        previous_previous_denoised=state.previous_denoised,
+        previous_previous_lambda=state.previous_lambda,
+    )
+
+
+def _flow_pc3_can_correct(state: FlowPC3State | None) -> bool:
+    return bool(
+        state is not None
+        and state.previous_denoised is not None
+        and state.previous_lambda is not None
+    )
+
+
+def _flow_pc3_history_depth(state: FlowPC3State | None) -> int:
+    if (
+        state is None
+        or state.previous_denoised is None
+        or state.previous_lambda is None
+    ):
+        return 0
+    if (
+        state.previous_previous_denoised is None
+        or state.previous_previous_lambda is None
+    ):
+        return 1
+    return 2
+
+
+def _flow_pc3_lower_order_final(step_index: int, total_steps: int) -> bool:
+    return int(total_steps) - int(step_index) <= 2
+
+
+def _flow_pc3_predictor_max_order(step_index: int, total_steps: int) -> int:
+    if _flow_pc3_lower_order_final(step_index, total_steps):
+        return 2
+    return 3
+
+
+def _flow_pc3_should_endpoint_correct(
+    torch,
+    state: FlowPC3State | None,
+    predictor_order: int,
+    step_index: int,
+    total_steps: int,
+    t_next,
+) -> bool:
+    if _scalar_float(torch, t_next) <= 0.0:
+        return False
+    if _flow_pc3_lower_order_final(step_index, total_steps):
+        return False
+    if _flow_pc3_history_depth(state) < 2:
+        return False
+    return int(predictor_order) >= 3
+
+
+def _flow_pc3_endpoint_skip_note(
+    torch,
+    state: FlowPC3State | None,
+    predictor_order: int,
+    step_index: int,
+    total_steps: int,
+    t_next,
+) -> str:
+    if _scalar_float(torch, t_next) <= 0.0:
+        return "pc3_terminal"
+    if _flow_pc3_lower_order_final(step_index, total_steps):
+        return "pc3_lower_order_final"
+    if _flow_pc3_history_depth(state) < 2 or int(predictor_order) < 3:
+        return "pc3_warmup"
+    return "pc3_endpoint_skipped"
+
+
+def _flow_pc3_clamped_gamma(
+    torch,
+    x,
+    x_pred,
+    x_corrected,
+    gamma,
+    lambda_next,
+    *,
+    predictor_order: int,
+    eps: float = 1e-6,
+):
+    if int(predictor_order) < 3:
+        return gamma
+
+    correction_rms = _rms(torch, x_corrected - x_pred)
+    if _scalar_float(torch, correction_rms) <= eps:
+        return gamma
+
+    predictor_step_rms = _rms(torch, x_pred - x)
+    anchor_rms = torch.maximum(_rms(torch, x_pred), _rms(torch, x))
+    lambda_next_f = _scalar_float(torch, lambda_next)
+    cap_ratio = 0.65 if lambda_next_f >= 3.5 else 0.90
+    correction_cap = torch.maximum(
+        predictor_step_rms * cap_ratio,
+        anchor_rms * 0.015,
+    )
+    applied_rms = torch.abs(gamma) * correction_rms
+    scale = torch.clamp(correction_cap / (applied_rms + eps), min=0.0, max=1.0)
+    return gamma * scale
 
 
 def flow_pc3_damped_step(
@@ -1912,9 +2449,11 @@ def flow_pc3_damped_step(
     state: FlowPC3State | None = None,
     max_gamma: float = 1.0,
     tolerance: float = 0.005,
+    x_pred=None,
+    predictor_order: int = 1,
     eps: float = 1e-6,
 ):
-    """Advance one RF x0 exponential PC3 step with Heun fallback damping."""
+    """Advance one RF x0 PC3 step with predictor/corrector damping."""
 
     result = flow_pc3_damped_step_result(
         x,
@@ -1925,6 +2464,8 @@ def flow_pc3_damped_step(
         state=state,
         max_gamma=max_gamma,
         tolerance=tolerance,
+        x_pred=x_pred,
+        predictor_order=predictor_order,
         eps=eps,
     )
     return result.x, result.state
@@ -1940,27 +2481,37 @@ def flow_pc3_damped_step_result(
     state: FlowPC3State | None = None,
     max_gamma: float = 1.0,
     tolerance: float = 0.005,
+    x_pred=None,
+    predictor_order: int = 1,
     eps: float = 1e-6,
 ) -> FlowPC3StepResult:
-    """Advance one RF x0 PC3 step and return diagnostics for cache gates."""
+    """Advance one RF x0 PC3 step and return predictor/corrector diagnostics."""
 
     if state is None:
         state = FlowPC3State()
 
     torch = importlib.import_module("torch")
     current_lambda = _rf_lambda(torch, t, eps=eps)
-    next_state = FlowPC3State(
-        previous_denoised=denoised,
-        previous_lambda=current_lambda,
-    )
+    next_state = _flow_pc3_next_state(torch, state, denoised, t, eps=eps)
+    predictor_order = max(1, int(predictor_order))
+    if x_pred is None:
+        predictor_result = flow_pc3_predictor_step_result(
+            x,
+            denoised,
+            t,
+            t_next,
+            state=state,
+            eps=eps,
+        )
+        x_pred = predictor_result.x
+        predictor_order = predictor_result.order
 
-    x_heun = flow_heun_step(x, denoised, denoised_pred, t, t_next, eps=eps)
     if float(t_next) <= 0.0 or float(t) <= 0.0:
         zero = x.new_tensor(0.0)
-        return FlowPC3StepResult(x_heun, next_state, x_heun, x_heun, zero, zero)
-    if state.previous_denoised is None or state.previous_lambda is None:
+        return FlowPC3StepResult(x_pred, next_state, x_pred, x_pred, zero, zero, predictor_order, 0)
+    if not _flow_pc3_can_correct(state):
         zero = x.new_tensor(0.0)
-        return FlowPC3StepResult(x_heun, next_state, x_heun, x_heun, zero, zero)
+        return FlowPC3StepResult(x_pred, next_state, x_pred, x_pred, zero, zero, predictor_order, 0)
 
     t_current = torch.clamp(_as_tensor_like(torch, t, x), min=eps)
     t_next_tensor = torch.clamp(_as_tensor_like(torch, t_next, x), min=0.0)
@@ -1969,13 +2520,13 @@ def flow_pc3_damped_step_result(
     h_previous = current_lambda - state.previous_lambda
     if _scalar_float(torch, h) <= eps or _scalar_float(torch, h_previous) <= eps:
         zero = x.new_tensor(0.0)
-        return FlowPC3StepResult(x_heun, next_state, x_heun, x_heun, zero, zero)
+        return FlowPC3StepResult(x_pred, next_state, x_pred, x_pred, zero, zero, predictor_order, 0)
 
     gamma_max = max(0.0, min(1.0, float(max_gamma)))
     tol = max(0.0, float(tolerance))
     if gamma_max <= 0.0 or tol <= 0.0:
         zero = x.new_tensor(0.0)
-        return FlowPC3StepResult(x_heun, next_state, x_heun, x_heun, zero, zero)
+        return FlowPC3StepResult(x_pred, next_state, x_pred, x_pred, zero, zero, predictor_order, 0)
 
     ratio = t_next_tensor / t_current
     c = t_next_tensor * torch.exp(current_lambda)
@@ -1990,25 +2541,37 @@ def flow_pc3_damped_step_result(
     ) / (previous_node * h)
     endpoint_weight = (k2 - previous_node * k1) / ((h - previous_node) * h)
 
-    x_am3 = ratio * x + c * (
+    x_corrected = ratio * x + c * (
         previous_weight * state.previous_denoised
         + current_weight * denoised
         + endpoint_weight * denoised_pred
     )
 
-    error = _rms(torch, x_am3 - x_heun) / (_rms(torch, x_heun) + eps)
+    error = _rms(torch, x_corrected - x_pred) / (_rms(torch, x_pred) + eps)
     tolerance_tensor = x.new_tensor(tol)
     gamma_error = torch.sqrt(torch.clamp(tolerance_tensor / (error + eps), min=0.0))
     gamma_error = torch.clamp(gamma_error, min=0.0, max=1.0)
     gamma_lambda = _flow_pc3_lambda_gate(torch, current_lambda, lambda_next)
     gamma = gamma_max * gamma_lambda * gamma_error
+    gamma = _flow_pc3_clamped_gamma(
+        torch,
+        x,
+        x_pred,
+        x_corrected,
+        gamma,
+        lambda_next,
+        predictor_order=predictor_order,
+        eps=eps,
+    )
     return FlowPC3StepResult(
-        x_heun + gamma * (x_am3 - x_heun),
+        x_pred + gamma * (x_corrected - x_pred),
         next_state,
-        x_heun,
-        x_am3,
+        x_pred,
+        x_corrected,
         gamma,
         error,
+        predictor_order,
+        3,
     )
 
 
@@ -2130,7 +2693,411 @@ def flow_3m_damped_step(
     return Flow3MStepResult(x_next, next_state, x_2m, x_3m, x.new_tensor(gamma3), e32, 3, coeff_l1)
 
 
-def _sparse_pc3_phase(step_index: int, total_steps: int, tail_start_step: int | None) -> str:
+def flow_unipc2_x0_step(
+    x,
+    denoised,
+    t,
+    t_next,
+    *,
+    state: FlowUniPC2State | None = None,
+    step_index: int | None = None,
+    total_steps: int | None = None,
+    solver_order: int = 2,
+    solver_type: str = "bh2",
+    lower_order_final: bool = True,
+    disable_corrector: tuple[int, ...] = (),
+    thresholding: bool = False,
+    dynamic_thresholding_ratio: float = 0.995,
+    sample_max_value: float = 1.0,
+    eps: float = 1e-6,
+) -> FlowUniPC2StepResult:
+    """Advance one RF x0 UniPC step with Cosmos 2.5's BH update structure.
+
+    Cosmos 2.5's FlowUniPC scheduler predicts flow/velocity and converts it to
+    x0 internally. ComfyUI's Anima FLOW wrapper already returns denoised x0, so
+    this implements the same predict-x0 UniP/UniC BH update directly in x0
+    space while preserving the official order warmup, lower-order final,
+    disable-corrector, solver-type, and thresholding switches.
+    """
+
+    if state is None:
+        state = FlowUniPC2State()
+    solver_order = int(solver_order)
+    if solver_order <= 0:
+        raise ValueError("solver_order must be positive")
+    solver_type = str(solver_type)
+    if solver_type not in {"bh1", "bh2"}:
+        raise ValueError("solver_type must be 'bh1' or 'bh2'")
+    if step_index is None:
+        step_index = int(state.lower_order_nums)
+    else:
+        step_index = int(step_index)
+    if total_steps is None:
+        total_steps = max(step_index + 1, step_index + solver_order + 1)
+    else:
+        total_steps = int(total_steps)
+
+    torch = importlib.import_module("torch")
+    current_lambda = _rf_lambda(torch, t, eps=eps)
+    current_t = torch.clamp(_as_tensor_like(torch, t, x), min=eps, max=1.0 - eps)
+    current_model_output = denoised
+    if thresholding:
+        current_model_output = _flow_unipc_threshold_sample(
+            torch,
+            current_model_output,
+            dynamic_thresholding_ratio=dynamic_thresholding_ratio,
+            sample_max_value=sample_max_value,
+        )
+
+    model_outputs, sigma_history, lambda_history = _flow_unipc_state_history(
+        state,
+        solver_order=solver_order,
+    )
+
+    x_corrected = x
+    corrector_order = 0
+    use_corrector = (
+        step_index > 0
+        and (step_index - 1) not in set(int(value) for value in disable_corrector)
+        and state.last_sample is not None
+        and model_outputs[-1] is not None
+        and sigma_history[-1] is not None
+        and lambda_history[-1] is not None
+    )
+    if use_corrector:
+        corrector_order = min(
+            max(1, int(state.this_order)),
+            _flow_unipc_available_order(model_outputs, sigma_history, lambda_history),
+        )
+        x_corrected = _flow_unipc2_x0_correct(
+            torch,
+            last_sample=state.last_sample,
+            this_sample=x,
+            current_model_output=current_model_output,
+            current_t=current_t,
+            current_lambda=current_lambda,
+            model_outputs=model_outputs,
+            sigma_history=sigma_history,
+            lambda_history=lambda_history,
+            order=corrector_order,
+            solver_type=solver_type,
+            eps=eps,
+        )
+
+    model_outputs = [*model_outputs[1:], current_model_output]
+    sigma_history = [*sigma_history[1:], current_t]
+    lambda_history = [*lambda_history[1:], current_lambda]
+
+    x_predictor = x
+    if float(t_next) <= 0.0 or float(t) <= 0.0:
+        x_next = current_model_output
+        x_predictor = x_next
+        predictor_order = 1
+    else:
+        if lower_order_final:
+            this_order = min(solver_order, max(1, total_steps - step_index))
+        else:
+            this_order = solver_order
+        predictor_order = min(
+            max(1, this_order),
+            int(state.lower_order_nums) + 1,
+            _flow_unipc_available_order(model_outputs, sigma_history, lambda_history),
+        )
+        x_predictor = _flow_unipc2_x0_predict(
+            torch,
+            x=x,
+            model_outputs=model_outputs,
+            sigma_history=sigma_history,
+            lambda_history=lambda_history,
+            t=current_t,
+            t_next=t_next,
+            order=predictor_order,
+            solver_type=solver_type,
+            eps=eps,
+        )
+        x_next = _flow_unipc2_x0_predict(
+            torch,
+            x=x_corrected,
+            model_outputs=model_outputs,
+            sigma_history=sigma_history,
+            lambda_history=lambda_history,
+            t=current_t,
+            t_next=t_next,
+            order=predictor_order,
+            solver_type=solver_type,
+            eps=eps,
+        )
+
+    next_state = FlowUniPC2State(
+        previous_denoised=current_model_output,
+        previous_t=current_t,
+        previous_lambda=current_lambda,
+        previous_previous_denoised=state.previous_denoised,
+        previous_previous_t=state.previous_t,
+        previous_previous_lambda=state.previous_lambda,
+        last_sample=x_corrected,
+        lower_order_nums=min(solver_order, int(state.lower_order_nums) + 1),
+        this_order=predictor_order,
+        model_outputs=tuple(model_outputs),
+        sigma_history=tuple(sigma_history),
+        lambda_history=tuple(lambda_history),
+    )
+    return FlowUniPC2StepResult(
+        x_next,
+        next_state,
+        x_corrected,
+        x_predictor,
+        predictor_order,
+        corrector_order,
+    )
+
+
+def _flow_unipc_state_history(
+    state: FlowUniPC2State,
+    *,
+    solver_order: int,
+) -> tuple[list[Any | None], list[Any | None], list[Any | None]]:
+    if state.model_outputs is not None:
+        model_outputs = list(state.model_outputs)
+        sigma_history = list(state.sigma_history or [])
+        lambda_history = list(state.lambda_history or [])
+    else:
+        model_outputs = [state.previous_previous_denoised, state.previous_denoised]
+        sigma_history = [state.previous_previous_t, state.previous_t]
+        lambda_history = [state.previous_previous_lambda, state.previous_lambda]
+
+    def fit_length(values: list[Any | None]) -> list[Any | None]:
+        if len(values) < solver_order:
+            return [None] * (solver_order - len(values)) + values
+        if len(values) > solver_order:
+            return values[-solver_order:]
+        return values
+
+    return fit_length(model_outputs), fit_length(sigma_history), fit_length(lambda_history)
+
+
+def _flow_unipc_available_order(
+    model_outputs: list[Any | None],
+    sigma_history: list[Any | None],
+    lambda_history: list[Any | None],
+) -> int:
+    count = 0
+    for model_output, sigma, lambda_value in zip(
+        reversed(model_outputs),
+        reversed(sigma_history),
+        reversed(lambda_history),
+    ):
+        if model_output is None or sigma is None or lambda_value is None:
+            break
+        count += 1
+    return max(1, count)
+
+
+def _flow_unipc2_x0_predict(
+    torch,
+    *,
+    x,
+    model_outputs,
+    sigma_history,
+    lambda_history,
+    t,
+    t_next,
+    order: int,
+    solver_type: str,
+    eps: float,
+):
+    t_current = torch.clamp(_as_tensor_like(torch, t, x), min=eps, max=1.0 - eps)
+    t_next_tensor = torch.clamp(_as_tensor_like(torch, t_next, x), min=eps, max=1.0 - eps)
+    current_lambda = lambda_history[-1]
+    lambda_next = _rf_lambda(torch, t_next, eps=eps)
+    h = lambda_next - current_lambda
+    h_f = _scalar_float(torch, h)
+    denoised = model_outputs[-1]
+    if h_f <= eps:
+        return flow_euler_step(x, denoised, t_current, t_next_tensor)
+
+    alpha_next = 1.0 - t_next_tensor
+    hh = -h
+    rks = []
+    d1s = []
+    if order >= 2:
+        for index in range(1, order):
+            previous_model_output = model_outputs[-(index + 1)]
+            previous_lambda = lambda_history[-(index + 1)]
+            rk = (previous_lambda - current_lambda) / h
+            if abs(_scalar_float(torch, rk)) <= eps:
+                order = 1
+                rks = []
+                d1s = []
+                break
+            rks.append(rk)
+            d1s.append((previous_model_output - denoised) / rk)
+    rks.append(x.new_tensor(1.0))
+    h_phi_1, b_h, rhos_p = _flow_unipc_bh_rhos(
+        torch,
+        hh,
+        rks=rks,
+        order=order,
+        solver_type=solver_type,
+        like=x,
+        predictor=True,
+        eps=eps,
+    )
+    base = (t_next_tensor / t_current) * x - alpha_next * h_phi_1 * denoised
+    if order < 2:
+        return base
+
+    pred_res = _flow_unipc_weighted_sum(rhos_p, d1s)
+    return base - alpha_next * b_h * pred_res
+
+
+def _flow_unipc2_x0_correct(
+    torch,
+    *,
+    last_sample,
+    this_sample,
+    current_model_output,
+    current_t,
+    current_lambda,
+    model_outputs,
+    sigma_history,
+    lambda_history,
+    order: int,
+    solver_type: str,
+    eps: float,
+):
+    previous_model_output = model_outputs[-1]
+    previous_t = sigma_history[-1]
+    previous_lambda = lambda_history[-1]
+    previous_t_tensor = torch.clamp(_as_tensor_like(torch, previous_t, last_sample), min=eps, max=1.0 - eps)
+    current_t_tensor = torch.clamp(_as_tensor_like(torch, current_t, last_sample), min=eps, max=1.0 - eps)
+    h = current_lambda - previous_lambda
+    h_f = _scalar_float(torch, h)
+    if h_f <= eps:
+        return this_sample
+
+    alpha_current = 1.0 - current_t_tensor
+    hh = -h
+    rks = []
+    d1s = []
+    if order >= 2:
+        for index in range(1, order):
+            earlier_model_output = model_outputs[-(index + 1)]
+            earlier_lambda = lambda_history[-(index + 1)]
+            rk = (earlier_lambda - previous_lambda) / h
+            if abs(_scalar_float(torch, rk)) <= eps:
+                order = 1
+                rks = []
+                d1s = []
+                break
+            rks.append(rk)
+            d1s.append((earlier_model_output - previous_model_output) / rk)
+    rks.append(last_sample.new_tensor(1.0))
+    h_phi_1, b_h, rhos_c = _flow_unipc_bh_rhos(
+        torch,
+        hh,
+        rks=rks,
+        order=order,
+        solver_type=solver_type,
+        like=last_sample,
+        predictor=False,
+        eps=eps,
+    )
+    base = (current_t_tensor / previous_t_tensor) * last_sample - alpha_current * h_phi_1 * previous_model_output
+    d1_current = current_model_output - previous_model_output
+
+    corr_res = _flow_unipc_weighted_sum(rhos_c[:-1], d1s)
+    return base - alpha_current * b_h * (corr_res + rhos_c[-1] * d1_current)
+
+
+def _flow_unipc_bh_rhos(
+    torch,
+    hh,
+    *,
+    rks,
+    order: int,
+    solver_type: str,
+    like,
+    predictor: bool,
+    eps: float,
+):
+    hh = hh.to(device=like.device, dtype=like.dtype) if hasattr(hh, "to") else like.new_tensor(float(hh))
+    if abs(_scalar_float(torch, hh)) <= eps:
+        h_phi_1 = hh
+    else:
+        h_phi_1 = torch.expm1(hh)
+
+    if solver_type == "bh1":
+        b_h = hh
+    elif solver_type == "bh2":
+        b_h = torch.expm1(hh)
+    else:
+        raise ValueError("solver_type must be 'bh1' or 'bh2'")
+
+    if order <= 1:
+        return h_phi_1, b_h, [like.new_tensor(0.5)]
+    if abs(_scalar_float(torch, b_h)) <= eps:
+        return h_phi_1, b_h, [like.new_tensor(0.5)] * (order - (1 if predictor else 0))
+
+    if predictor and order == 2:
+        return h_phi_1, b_h, [like.new_tensor(0.5)]
+    if (not predictor) and order == 1:
+        return h_phi_1, b_h, [like.new_tensor(0.5)]
+
+    rks = torch.stack(
+        [
+            value.to(device=like.device, dtype=like.dtype)
+            if hasattr(value, "to")
+            else like.new_tensor(float(value))
+            for value in rks
+        ]
+    )
+
+    rows = []
+    rhs = []
+    h_phi_k = h_phi_1 / hh - 1.0
+    factorial_i = 1
+    for index in range(1, order + 1):
+        rows.append(torch.pow(rks, index - 1))
+        rhs.append(h_phi_k * factorial_i / b_h)
+        factorial_i *= index + 1
+        h_phi_k = h_phi_k / hh - 1.0 / factorial_i
+    matrix = torch.stack(rows)
+    vector = torch.stack(rhs).to(device=like.device, dtype=like.dtype)
+    if predictor:
+        rhos = torch.linalg.solve(matrix[:-1, :-1], vector[:-1])
+    else:
+        rhos = torch.linalg.solve(matrix, vector)
+    return h_phi_1, b_h, [value.to(device=like.device, dtype=like.dtype) for value in rhos]
+
+
+def _flow_unipc_weighted_sum(weights, values):
+    if not values:
+        return 0.0
+    out = values[0] * weights[0]
+    for weight, value in zip(weights[1:], values[1:]):
+        out = out + weight * value
+    return out
+
+
+def _flow_unipc_threshold_sample(
+    torch,
+    sample,
+    *,
+    dynamic_thresholding_ratio: float,
+    sample_max_value: float,
+):
+    dtype = sample.dtype
+    value = sample.float() if dtype not in (torch.float32, torch.float64) else sample
+    batch_size = int(value.shape[0])
+    flat = value.reshape(batch_size, -1)
+    thresholds = torch.quantile(flat.abs(), float(dynamic_thresholding_ratio), dim=1)
+    thresholds = torch.clamp(thresholds, min=1.0, max=float(sample_max_value)).reshape(batch_size, 1)
+    flat = torch.clamp(flat, -thresholds, thresholds) / thresholds
+    return flat.reshape(value.shape).to(dtype)
+
+
+def _sampler_trace_phase(step_index: int, total_steps: int, tail_start_step: int | None) -> str:
     if tail_start_step is not None and step_index >= tail_start_step:
         return "tail"
     progress = step_index / max(total_steps - 1, 1)
@@ -2139,104 +3106,6 @@ def _sparse_pc3_phase(step_index: int, total_steps: int, tail_start_step: int | 
     if progress >= 0.68:
         return "tail"
     return "body"
-
-
-def _sparse_pc3_budget(total_steps: int) -> dict[str, int]:
-    if total_steps <= 30:
-        return {"high": 1, "body": 2, "tail": 3}
-    if total_steps <= 38:
-        return {"high": 1, "body": 3, "tail": 4}
-    return {"high": 1, "body": 4, "tail": 5}
-
-
-def _sparse_pc3_risk(
-    torch,
-    *,
-    denoised,
-    t,
-    t_next,
-    state: FlowERState,
-    result: Flow3MStepResult,
-    tolerance: float,
-    eps: float = 1e-6,
-) -> float:
-    current_lambda = _rf_lambda(torch, t, eps=eps)
-    lambda_next = _rf_lambda(torch, t_next, eps=eps)
-    h = _scalar_float(torch, lambda_next - current_lambda)
-    sqrt_t = math.sqrt(max(0.0, min(1.0, _scalar_float(torch, t))))
-    tau32 = max(eps, float(tolerance) * (0.50 + 0.80 * sqrt_t))
-    risk = _scalar_float(torch, result.e32) / tau32
-
-    if state.previous_denoised is not None and state.previous_lambda is not None:
-        h_prev = _scalar_float(torch, current_lambda - state.previous_lambda)
-        if h_prev > eps:
-            c1 = (h / h_prev) * _scalar_float(
-                torch,
-                _rms(torch, denoised - state.previous_denoised) / (_rms(torch, denoised) + eps),
-            )
-            tau1 = 0.08 + 0.08 * sqrt_t
-            risk = max(risk, 0.5 * c1 / tau1)
-
-    if (
-        state.previous_denoised is not None
-        and state.previous_lambda is not None
-        and state.previous_previous_denoised is not None
-        and state.previous_previous_lambda is not None
-    ):
-        h_prev = _scalar_float(torch, current_lambda - state.previous_lambda)
-        h_prevprev = _scalar_float(torch, state.previous_lambda - state.previous_previous_lambda)
-        if h_prev > eps and h_prevprev > eps:
-            s_i = (denoised - state.previous_denoised) / h_prev
-            s_prev = (state.previous_denoised - state.previous_previous_denoised) / h_prevprev
-            c2 = _scalar_float(
-                torch,
-                h
-                * h
-                * _rms(torch, s_i - s_prev)
-                / ((h_prev + h_prevprev) * (_rms(torch, denoised) + eps)),
-            )
-            tau2 = 0.006 + 0.010 * sqrt_t
-            risk = max(risk, c2 / tau2)
-
-    return float(risk)
-
-
-def _should_do_sparse_pc3(
-    step_index: int,
-    total_steps: int,
-    *,
-    phase: str,
-    risk: float,
-    used: dict[str, int],
-    budget: dict[str, int],
-    last_pc3_step: int,
-    tail_start_step: int | None,
-) -> bool:
-    if step_index >= total_steps - 1:
-        return False
-    if used.get(phase, 0) >= budget.get(phase, 0):
-        return False
-
-    if phase == "high":
-        threshold = 1.6
-        min_gap = 3
-    elif phase == "body":
-        threshold = 1.0
-        min_gap = 2
-    else:
-        threshold = 0.75
-        min_gap = 1
-
-    if step_index - last_pc3_step < min_gap:
-        return False
-
-    trigger = risk > threshold or risk > 1.8
-    if phase == "tail":
-        tail_start = tail_start_step if tail_start_step is not None else int(0.68 * total_steps)
-        tail_offset = step_index - tail_start
-        if tail_offset >= 2 and tail_offset % 3 == 0:
-            trigger = True
-    return trigger
 
 
 def flow_er_step(
@@ -2361,15 +3230,61 @@ def _finite_schedule_terminal(torch, sigmas):
     return sigmas[-1]
 
 
+def _active_integration_steps(torch, sigmas, *, final_clean_pass: bool) -> int:
+    total = int(sigmas.shape[0]) - 1
+    if (
+        bool(final_clean_pass)
+        and total >= 1
+        and _scalar_float(torch, sigmas[-1]) <= 0.0
+    ):
+        return max(1, total - 1)
+    return total
+
+
+def _accelerating_tail_start_step(torch, sigmas) -> int | None:
+    finite_count = int(sigmas.shape[0]) - 1
+    if finite_count < 8:
+        return None
+
+    times = [_scalar_float(torch, sigmas[index]) for index in range(finite_count)]
+    ells = [-math.log(max(value, 1e-12)) for value in times]
+    gaps = [right - left for left, right in zip(ells, ells[1:])]
+    if len(gaps) < 4:
+        return None
+
+    for index in range(3, len(gaps)):
+        t_value = min(max(times[index], 1e-12), 1.0 - 1e-12)
+        lambda_value = math.log((1.0 - t_value) / t_value)
+        if lambda_value < 0.0:
+            continue
+
+        history = gaps[max(0, index - 6) : index]
+        if len(history) < 3:
+            continue
+        base_gap = sorted(history)[len(history) // 2]
+        if base_gap <= 0.0:
+            continue
+        local_future = gaps[index : min(len(gaps), index + 3)]
+        if gaps[index] >= max(1.65 * base_gap, base_gap + 0.04) and all(
+            gap >= 1.25 * base_gap for gap in local_future
+        ):
+            return index
+    return None
+
+
 def _hybrid_tail_start_step(
     torch,
     sigmas,
     flow_schedule: str,
     *,
     flow_shift: float = 1.0,
+    flow_rho7_tail_auto: bool = False,
 ) -> int | None:
-    is_rho_tail = str(flow_schedule).startswith("flow_cosmos_rho7_rf_tail_")
-    is_shift_tail = _flow_shift_is_active(flow_schedule, flow_shift)
+    is_rho_tail = str(flow_schedule) == "flow_cosmos_rho7" and bool(flow_rho7_tail_auto)
+    is_shift_tail = str(flow_schedule) == "flow_cosmos_rf_tail"
+    is_s_tail = str(flow_schedule) == "flow_rf_linear_s_tail_shift5"
+    if is_s_tail:
+        return _accelerating_tail_start_step(torch, sigmas)
     if not (is_rho_tail or is_shift_tail):
         return None
 

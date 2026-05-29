@@ -1,24 +1,59 @@
 # ComfyUI Anima Flow Corrective Sampler
 
 Custom ComfyUI sampler nodes for Anima / Cosmos-style rectified-flow image
-models. The default profile packages the current tested Anima workflow:
+models. It packages a Cosmos-aligned RF linear shift schedule with UniPC and
+PC3 solver options for stronger structure, spatial consistency, and detail
+retention in ComfyUI.
+
+This is an independent implementation, not an official NVIDIA or CircleStone
+Labs release. The design is aligned with public Cosmos / Cosmos Predict2.5
+pipeline ideas such as rectified-flow scheduling and UniPC-style
+predictor-corrector sampling.
+
+The default profile packages the current tested Anima workflow:
 
 ```text
-solver        = flow_pc3_damped
-schedule      = flow_cosmos
+solver        = flow_unipc2_x0
+schedule      = flow_rf_linear_shift
 flow_shift    = 5.0
 steps         = 35
-cfg           = 6.0
-cfg_mode      = bump cfg
+cfg           = 7.0
+cfg_mode      = const
 ```
 
 The goal is to improve prompt structure, spatial relationships, and detail
 stability while keeping the node surface small enough for daily use.
 
+## Example Output
+
+The files below were generated from the same prompt family and are included as
+single-image examples instead of a four-way grid. Import
+[`examples/workflows/anima_better_sampler.json`](examples/workflows/anima_better_sampler.json)
+in ComfyUI to inspect the example workflow.
+
+**UniPC, linear shift5, const CFG 7**
+
+<img src="examples/comparison/unipc_linear_shift_cfg7.png" alt="UniPC linear shift CFG 7 example" width="520">
+
+**PC3, linear shift5, const CFG 7**
+
+<img src="examples/comparison/pc3_linear_shift_cfg7.png" alt="PC3 linear shift CFG 7 example" width="520">
+
+**er_sde + simple, CFG 4.5**
+
+<img src="examples/comparison/er_sde_simple_cfg45.png" alt="er_sde simple CFG 4.5 example" width="520">
+
+**er_sde + simple, CFG 7**
+
+<img src="examples/comparison/er_sde_simple_cfg7.png" alt="er_sde simple CFG 7 example" width="520">
+
 ## Nodes
 
 - `Anima Flow Corrective Sampler`: the main sampler node.
 - `Anima Flow Settings`: optional advanced controls for solver and CFG tuning.
+- `Anima Four Way Comparison`: fixed four-way image grid for UniPC linear
+  shift cfg7, PC3 linear shift cfg7, `er_sde + simple` cfg4.5, and
+  `er_sde + simple` cfg7.
 
 The sampler works without connecting `Anima Flow Settings`; the tested defaults
 are built in. Connect the settings node only when you want to tune advanced
@@ -27,6 +62,14 @@ parameters.
 The sampler outputs both `LATENT` and `IMAGE`. Connect a `VAE` to the optional
 `vae` input when you want the image output decoded directly from the sampler.
 Leave `vae` disconnected when you only need the latent output.
+
+The four-way comparison node requires a `VAE` and outputs a labeled comparison
+image, four individual images, and a log. It is intended for quick visual checks
+against the native `er_sde + simple` baseline.
+
+`ramp cfg` starts guidance low and smoothly raises it to the selected `cfg`.
+With the default `cfg=7`, it starts near `4.5`, keeps that low guidance through
+the early high-noise phase, and reaches `7` before the tail/detail phase.
 
 ## Install
 
@@ -50,27 +93,75 @@ Use `Anima Flow Corrective Sampler` in place of a normal sampler node.
 Everyday controls:
 
 - `steps`: default `35`
-- `cfg`: default `6.0`
-- `cfg_mode`: `bump cfg` or `const`
-- `flow_solver`: default `flow_pc3_damped`
-- `flow_schedule`: default `flow_cosmos`
-- `flow_shift`: default `5.0`
+- `cfg`: default `7.0`
+- `cfg_mode`: `const`, `bump cfg`, or `ramp cfg`
+- `flow_solver`: default `flow_unipc2_x0`
+- `flow_schedule`: default `flow_rf_linear_shift`
+- `flow_shift`: default `5.0` and used by shift-aware schedules such as
+  `flow_cosmos_rf_tail` and `flow_rf_linear_shift`
 - `denoise`
 - `add_noise`
 - optional `vae` for direct image output
 
-`flow_shift` affects `flow_cosmos`. Set it to `1.0` for no extra shift. The
-`flow_cosmos_rho7_rf_tail_auto` schedule ignores `flow_shift` by design.
+`flow_cosmos` is now the pure Cosmos RFlow-shaped schedule. Use
+`flow_cosmos_rf_tail` when you want the shifted RF-tail path controlled by
+`flow_shift`.
+
+`flow_cosmos_rho7` is the pure rho7/Karras-style Cosmos schedule. Connect
+`Anima Flow Settings` and enable `flow_rho7_tail_auto` to add the previous
+RF-tail-auto modification on top of rho7.
+
+`flow_rf_linear_shift` follows the newer Cosmos Predict2.5 normalized RF
+linear inference grid with the same shift formula used by their FlowUniPC
+scheduler. It uses `flow_shift` directly; `flow_shift 5.0` matches their
+published default shape. When this schedule is selected without connecting
+`Anima Flow Settings`, the sampler automatically disables `final_clean_pass`
+to match Cosmos 2.5's default "walk to terminal zero" behavior.
+
+`flow_rf_linear_s_tail_shift5` is a fixed shift-5 extension of
+`flow_rf_linear_shift`. It keeps the early section close to linear shift5, then
+uses an S-shaped sigmoid tail near the final 30-step region to enter low-noise
+refinement more smoothly.
+The external `flow_shift` value is ignored by this schedule because shift5 is
+baked into the preset name.
 
 ## Current Default
 
-The packaged default is based on matched-seed testing where
-`flow_pc3_damped + flow_cosmos + flow_shift 5.0 + bump cfg` gave the best
-balance of semantic adherence, complex relationship handling, and low-noise
-detail stability.
+The packaged default now follows the Cosmos 2.5-style path:
+`flow_unipc2_x0 + flow_rf_linear_shift + flow_shift 5.0 + const cfg 7.0`,
+with no final clean pass when the settings node is disconnected.
+`flow_pc3_damped + flow_cosmos` and `flow_cosmos_rf_tail + flow_shift 5.0`
+remain available as explicit alternatives from previous testing.
 
-`flow_cosmos_rho7_rf_tail_auto` remains available as a quality baseline.
+`flow_cosmos_rf_tail` preserves the old shifted RF-tail behavior.
+`flow_cosmos_rho7` remains available as a quality/reference baseline.
+`flow_rf_linear_shift` is available for testing the newer Cosmos 2.5 default
+linear+shift schedule.
+`flow_rf_linear_s_tail_shift5` is available as the fixed shift5 linear+S-tail
+variant.
 `simple` remains available for comparison with native ComfyUI-style schedules.
+
+`flow_unipc2_x0` is available as an Anima-adapted FlowUniPC solver. It applies
+the Cosmos 2.5 UniP/UniC BH predictor/corrector structure directly to
+ComfyUI's denoised/x0 output instead of treating it as Cosmos 2.5 velocity
+output. The settings node exposes the original-style UniPC controls for
+solver order, `bh1`/`bh2`, lower-order final, disabled early correctors, and
+dynamic thresholding.
+
+`flow_ab2` is available as a one-model-call Adams-Bashforth 2 solver. It uses
+the previous x0 prediction after an Euler warmup step, matching the residual
+x0 AB2 idea in the Cosmos reference scheduler while using this sampler's
+normalized RF time.
+
+The sampler runs a final clean pass by default: when enabled, the integration
+loop stops at the last non-zero sigma instead of taking the appended terminal
+zero interval, then asks the model for one more x0/denoised prediction at that
+same non-zero sigma. This matches the explicit clean pass used in the Cosmos
+reference pipelines more closely than cleaning a terminal-zero state, and can
+be disabled from `Anima Flow Settings` for A/B testing. `flow_rf_linear_shift`
+and `flow_rf_linear_s_tail_shift5` are the exceptions in the disconnected daily
+sampler: they default to no final clean pass so the linear RF presets walk to
+terminal zero.
 
 ## Development
 
@@ -79,6 +170,12 @@ Run the local test suite from the repository root:
 ```text
 python -m unittest discover -s tests
 ```
+
+## References
+
+- NVIDIA Cosmos Predict2: https://github.com/nvidia-cosmos/cosmos-predict2
+- NVIDIA Cosmos Predict2.5: https://github.com/nvidia-cosmos/cosmos-predict2.5
+- UniPC paper: https://arxiv.org/abs/2302.04867
 
 ## License
 

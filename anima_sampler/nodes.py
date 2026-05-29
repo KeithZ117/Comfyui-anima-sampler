@@ -4,31 +4,48 @@ from __future__ import annotations
 
 import math
 
+from .experiment import build_labeled_comparison_grid
 from .flow_sampler import (
     CFG_SCHEDULE_MODES,
     FLOW_SCHEDULES,
     FLOW_SOLVERS,
     run_comfy_anima_sampler,
+    run_comfy_native_sampler,
 )
 
 ANIMA_FLOW_SETTINGS = "ANIMA_FLOW_SETTINGS"
-DEFAULT_FLOW_SCHEDULE = "flow_cosmos"
-PUBLIC_CFG_MODES = ["bump cfg", "const"]
+NODE_CATEGORY = "anima sampler"
+DEFAULT_FLOW_SCHEDULE = "flow_rf_linear_shift"
+DEFAULT_PUBLIC_CFG_MODE = "const"
+PUBLIC_CFG_MODES = ["const", "bump cfg", "ramp cfg"]
+NO_FINAL_CLEAN_DISCONNECTED_SCHEDULES = {
+    "flow_rf_linear_shift",
+    "flow_rf_linear_s_tail_shift5",
+}
 
 ANIMA_FLOW_BASELINE = {
     "steps": 35,
-    "cfg": 6.0,
-    "flow_solver": "flow_pc3_damped",
+    "cfg": 7.0,
+    "flow_solver": "flow_unipc2_x0",
     "flow_er_order": 2,
     "flow_pc3_gamma": 1.0,
     "flow_pc3_tolerance": 0.005,
+    "flow_unipc_order": 2,
+    "flow_unipc_solver_type": "bh2",
+    "flow_unipc_lower_order_final": True,
+    "flow_unipc_disable_corrector_first": 0,
+    "flow_unipc_thresholding": False,
+    "flow_unipc_dynamic_thresholding_ratio": 0.995,
+    "flow_unipc_sample_max_value": 1.0,
     "flow_schedule": DEFAULT_FLOW_SCHEDULE,
     "flow_shift": 5.0,
+    "flow_rho7_tail_auto": False,
+    "final_clean_pass": False,
     "cosmos_sigma_max": 80.0,
     "cosmos_sigma_min": 0.002,
     "denoise_legacy_progress": False,
     "cfg_legacy_progress": False,
-    "cfg_schedule_mode": "beta_bump",
+    "cfg_schedule_mode": "constant",
     "early_cfg_boost": 0.5,
     "early_cfg_until": 0.30,
     "late_cfg_scale": 1.0,
@@ -81,6 +98,52 @@ class AnimaFlowSettings:
                         "min": 0.0001,
                         "max": 0.05,
                         "step": 0.0005,
+                    },
+                ),
+                "flow_unipc_order": (
+                    "INT",
+                    {
+                        "default": ANIMA_FLOW_BASELINE["flow_unipc_order"],
+                        "min": 1,
+                        "max": 6,
+                    },
+                ),
+                "flow_unipc_solver_type": (
+                    ["bh2", "bh1"],
+                    {"default": ANIMA_FLOW_BASELINE["flow_unipc_solver_type"]},
+                ),
+                "flow_unipc_lower_order_final": (
+                    "BOOLEAN",
+                    {"default": ANIMA_FLOW_BASELINE["flow_unipc_lower_order_final"]},
+                ),
+                "flow_unipc_disable_corrector_first": (
+                    "INT",
+                    {
+                        "default": ANIMA_FLOW_BASELINE["flow_unipc_disable_corrector_first"],
+                        "min": 0,
+                        "max": 10,
+                    },
+                ),
+                "flow_unipc_thresholding": (
+                    "BOOLEAN",
+                    {"default": ANIMA_FLOW_BASELINE["flow_unipc_thresholding"]},
+                ),
+                "flow_unipc_dynamic_thresholding_ratio": (
+                    "FLOAT",
+                    {
+                        "default": ANIMA_FLOW_BASELINE["flow_unipc_dynamic_thresholding_ratio"],
+                        "min": 0.5,
+                        "max": 1.0,
+                        "step": 0.001,
+                    },
+                ),
+                "flow_unipc_sample_max_value": (
+                    "FLOAT",
+                    {
+                        "default": ANIMA_FLOW_BASELINE["flow_unipc_sample_max_value"],
+                        "min": 1.0,
+                        "max": 10.0,
+                        "step": 0.1,
                     },
                 ),
                 "cfg_early_scale": (
@@ -172,6 +235,14 @@ class AnimaFlowSettings:
                     "BOOLEAN",
                     {"default": ANIMA_FLOW_BASELINE["denoise_legacy_progress"]},
                 ),
+                "flow_rho7_tail_auto": (
+                    "BOOLEAN",
+                    {"default": ANIMA_FLOW_BASELINE["flow_rho7_tail_auto"]},
+                ),
+                "final_clean_pass": (
+                    "BOOLEAN",
+                    {"default": ANIMA_FLOW_BASELINE["final_clean_pass"]},
+                ),
                 "cosmos_sigma_max": (
                     "FLOAT",
                     {
@@ -218,13 +289,20 @@ class AnimaFlowSettings:
     RETURN_TYPES = (ANIMA_FLOW_SETTINGS, "STRING")
     RETURN_NAMES = ("settings", "summary")
     FUNCTION = "build"
-    CATEGORY = "Anima/Error Corrective Sampling"
+    CATEGORY = NODE_CATEGORY
 
     def build(
         self,
         flow_er_order,
         flow_pc3_gamma,
         flow_pc3_tolerance,
+        flow_unipc_order,
+        flow_unipc_solver_type,
+        flow_unipc_lower_order_final,
+        flow_unipc_disable_corrector_first,
+        flow_unipc_thresholding,
+        flow_unipc_dynamic_thresholding_ratio,
+        flow_unipc_sample_max_value,
         cfg_early_scale,
         cfg_early_ramp_end,
         cfg_peak_boost,
@@ -236,6 +314,8 @@ class AnimaFlowSettings:
         late_cfg_start,
         cfg_legacy_progress,
         denoise_legacy_progress,
+        flow_rho7_tail_auto,
+        final_clean_pass,
         cosmos_sigma_max,
         cosmos_sigma_min,
         rf_endpoint_noise_refresh_enabled,
@@ -248,6 +328,13 @@ class AnimaFlowSettings:
                 "flow_er_order": flow_er_order,
                 "flow_pc3_gamma": flow_pc3_gamma,
                 "flow_pc3_tolerance": flow_pc3_tolerance,
+                "flow_unipc_order": flow_unipc_order,
+                "flow_unipc_solver_type": flow_unipc_solver_type,
+                "flow_unipc_lower_order_final": flow_unipc_lower_order_final,
+                "flow_unipc_disable_corrector_first": flow_unipc_disable_corrector_first,
+                "flow_unipc_thresholding": flow_unipc_thresholding,
+                "flow_unipc_dynamic_thresholding_ratio": flow_unipc_dynamic_thresholding_ratio,
+                "flow_unipc_sample_max_value": flow_unipc_sample_max_value,
                 "cfg_early_scale": cfg_early_scale,
                 "cfg_early_ramp_end": cfg_early_ramp_end,
                 "cfg_peak_boost": cfg_peak_boost,
@@ -259,6 +346,8 @@ class AnimaFlowSettings:
                 "late_cfg_start": late_cfg_start,
                 "cfg_legacy_progress": cfg_legacy_progress,
                 "denoise_legacy_progress": denoise_legacy_progress,
+                "flow_rho7_tail_auto": flow_rho7_tail_auto,
+                "final_clean_pass": final_clean_pass,
                 "cosmos_sigma_max": cosmos_sigma_max,
                 "cosmos_sigma_min": cosmos_sigma_min,
                 "rf_endpoint_noise_refresh_enabled": rf_endpoint_noise_refresh_enabled,
@@ -305,7 +394,7 @@ class AnimaFlowCorrectiveSampler:
                         "step": 0.1,
                     },
                 ),
-                "cfg_mode": (PUBLIC_CFG_MODES, {"default": "bump cfg"}),
+                "cfg_mode": (PUBLIC_CFG_MODES, {"default": DEFAULT_PUBLIC_CFG_MODE}),
                 "flow_solver": (FLOW_SOLVERS, {"default": ANIMA_FLOW_BASELINE["flow_solver"]}),
                 "flow_schedule": (FLOW_SCHEDULES, {"default": ANIMA_FLOW_BASELINE["flow_schedule"]}),
                 "flow_shift": (
@@ -337,7 +426,7 @@ class AnimaFlowCorrectiveSampler:
     RETURN_TYPES = ("LATENT", "IMAGE", "STRING")
     RETURN_NAMES = ("latent", "image", "log")
     FUNCTION = "sample"
-    CATEGORY = "Anima/Error Corrective Sampling"
+    CATEGORY = NODE_CATEGORY
 
     def sample(
         self,
@@ -369,6 +458,7 @@ class AnimaFlowCorrectiveSampler:
                 "flow_shift": flow_shift,
             }
         )
+        params = _apply_disconnected_sampler_defaults(params, flow_settings)
         params = _apply_public_cfg_mode(params, cfg_mode)
         latent_out, log = _run_sampler_with_params(
             model=model,
@@ -388,6 +478,250 @@ class AnimaFlowCorrectiveSampler:
         return latent_out, image, log
 
 
+class AnimaFourWayComparison:
+    """Generate a fixed four-way comparison grid for final sampler checks."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "latent_image": ("LATENT",),
+                "vae": ("VAE",),
+                "seed": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 0,
+                        "max": 0xFFFFFFFFFFFFFFFF,
+                    },
+                ),
+                "steps": (
+                    "INT",
+                    {
+                        "default": ANIMA_FLOW_BASELINE["steps"],
+                        "min": 1,
+                        "max": 1000,
+                    },
+                ),
+                "unipc_cfg": (
+                    "FLOAT",
+                    {
+                        "default": 7.0,
+                        "min": 0.0,
+                        "max": 30.0,
+                        "step": 0.1,
+                    },
+                ),
+                "pc3_cfg": (
+                    "FLOAT",
+                    {
+                        "default": 7.0,
+                        "min": 0.0,
+                        "max": 30.0,
+                        "step": 0.1,
+                    },
+                ),
+                "er_official_cfg": (
+                    "FLOAT",
+                    {
+                        "default": 4.5,
+                        "min": 0.0,
+                        "max": 30.0,
+                        "step": 0.1,
+                    },
+                ),
+                "er_high_cfg": (
+                    "FLOAT",
+                    {
+                        "default": 7.0,
+                        "min": 0.0,
+                        "max": 30.0,
+                        "step": 0.1,
+                    },
+                ),
+                "denoise": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.01,
+                        "max": 1.0,
+                        "step": 0.01,
+                    },
+                ),
+                "add_noise": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "STRING")
+    RETURN_NAMES = (
+        "comparison",
+        "unipc_image",
+        "pc3_image",
+        "er_sde_simple_cfg45_image",
+        "er_sde_simple_cfg7_image",
+        "log",
+    )
+    FUNCTION = "compare"
+    CATEGORY = NODE_CATEGORY
+
+    def compare(
+        self,
+        model,
+        positive,
+        negative,
+        latent_image,
+        vae,
+        seed,
+        steps,
+        unipc_cfg,
+        pc3_cfg,
+        er_official_cfg,
+        er_high_cfg,
+        denoise,
+        add_noise,
+    ):
+        unipc_params = _constant_linear_shift_profile(
+            seed=seed,
+            steps=steps,
+            cfg=unipc_cfg,
+            flow_solver="flow_unipc2_x0",
+        )
+        pc3_params = _constant_linear_shift_profile(
+            seed=seed,
+            steps=steps,
+            cfg=pc3_cfg,
+            flow_solver="flow_pc3_damped",
+        )
+
+        unipc_latent, unipc_log = _run_sampler_with_params(
+            model=model,
+            positive=positive,
+            negative=negative,
+            latent_image=latent_image,
+            params=unipc_params,
+            denoise=denoise,
+            add_noise=add_noise,
+            disable_pbar=False,
+        )
+        pc3_latent, pc3_log = _run_sampler_with_params(
+            model=model,
+            positive=positive,
+            negative=negative,
+            latent_image=latent_image,
+            params=pc3_params,
+            denoise=denoise,
+            add_noise=add_noise,
+            disable_pbar=False,
+        )
+        er_official_latent, er_official_log = run_comfy_native_sampler(
+            model=model,
+            positive=positive,
+            negative=negative,
+            latent=latent_image,
+            seed=int(seed),
+            steps=int(steps),
+            cfg=float(er_official_cfg),
+            denoise=float(denoise),
+            sampler_name="er_sde",
+            scheduler="simple",
+            add_noise=bool(add_noise),
+            disable_pbar=False,
+        )
+        er_high_latent, er_high_log = run_comfy_native_sampler(
+            model=model,
+            positive=positive,
+            negative=negative,
+            latent=latent_image,
+            seed=int(seed),
+            steps=int(steps),
+            cfg=float(er_high_cfg),
+            denoise=float(denoise),
+            sampler_name="er_sde",
+            scheduler="simple",
+            add_noise=bool(add_noise),
+            disable_pbar=False,
+        )
+
+        unipc_image = _decode_latent_image(vae, unipc_latent)
+        pc3_image = _decode_latent_image(vae, pc3_latent)
+        er_official_image = _decode_latent_image(vae, er_official_latent)
+        er_high_image = _decode_latent_image(vae, er_high_latent)
+        comparison = build_labeled_comparison_grid(
+            [unipc_image, pc3_image, er_official_image, er_high_image],
+            [
+                f"UniPC + linear shift5 + const cfg {float(unipc_cfg):.2f}",
+                f"PC3 + linear shift5 + const cfg {float(pc3_cfg):.2f}",
+                f"er_sde + simple cfg {float(er_official_cfg):.2f}",
+                f"er_sde + simple cfg {float(er_high_cfg):.2f}",
+            ],
+            columns=2,
+            label_height=64,
+            gap=8,
+        )
+
+        log = "\n\n".join(
+            [
+                "AnimaFourWayComparison",
+                "profile_a: flow_unipc2_x0 + flow_rf_linear_shift + flow_shift=5.0 + const cfg",
+                "profile_b: flow_pc3_damped + flow_rf_linear_shift + flow_shift=5.0 + const cfg",
+                "profile_c: er_sde + simple",
+                "profile_d: er_sde + simple",
+                f"seed: {int(seed)}",
+                f"steps: {int(steps)}",
+                f"unipc_cfg: {float(unipc_cfg):.4f}",
+                f"pc3_cfg: {float(pc3_cfg):.4f}",
+                f"er_official_cfg: {float(er_official_cfg):.4f}",
+                f"er_high_cfg: {float(er_high_cfg):.4f}",
+                f"denoise: {float(denoise):.4f}",
+                f"add_noise: {bool(add_noise)}",
+                "unipc_log:",
+                unipc_log,
+                "pc3_log:",
+                pc3_log,
+                "er_sde_simple_cfg45_log:",
+                er_official_log,
+                "er_sde_simple_cfg7_log:",
+                er_high_log,
+            ]
+        )
+        return (
+            comparison,
+            unipc_image,
+            pc3_image,
+            er_official_image,
+            er_high_image,
+            log,
+        )
+
+
+def _apply_disconnected_sampler_defaults(params: dict, flow_settings) -> dict:
+    out = dict(params)
+    if flow_settings is None:
+        out["final_clean_pass"] = (
+            out["flow_schedule"] not in NO_FINAL_CLEAN_DISCONNECTED_SCHEDULES
+        )
+    return _normalize_flow_params(out)
+
+
+def _constant_linear_shift_profile(*, seed, steps, cfg, flow_solver: str) -> dict:
+    params = _normalize_flow_params(
+        {
+            **ANIMA_FLOW_BASELINE,
+            "seed": seed,
+            "steps": steps,
+            "cfg": cfg,
+            "flow_solver": flow_solver,
+            "flow_schedule": "flow_rf_linear_shift",
+            "flow_shift": 5.0,
+            "final_clean_pass": False,
+        }
+    )
+    return _apply_public_cfg_mode(params, "const")
+
+
 def _run_sampler_with_params(
     *,
     model,
@@ -398,6 +732,7 @@ def _run_sampler_with_params(
     denoise,
     add_noise,
     disable_pbar,
+    collect_diagnostics=False,
 ):
     return run_comfy_anima_sampler(
         model=model,
@@ -412,8 +747,17 @@ def _run_sampler_with_params(
         flow_er_order=int(params["flow_er_order"]),
         flow_pc3_gamma=float(params["flow_pc3_gamma"]),
         flow_pc3_tolerance=float(params["flow_pc3_tolerance"]),
+        flow_unipc_order=int(params["flow_unipc_order"]),
+        flow_unipc_solver_type=str(params["flow_unipc_solver_type"]),
+        flow_unipc_lower_order_final=bool(params["flow_unipc_lower_order_final"]),
+        flow_unipc_disable_corrector_first=int(params["flow_unipc_disable_corrector_first"]),
+        flow_unipc_thresholding=bool(params["flow_unipc_thresholding"]),
+        flow_unipc_dynamic_thresholding_ratio=float(params["flow_unipc_dynamic_thresholding_ratio"]),
+        flow_unipc_sample_max_value=float(params["flow_unipc_sample_max_value"]),
         flow_schedule=str(params["flow_schedule"]),
         flow_shift=float(params["flow_shift"]),
+        flow_rho7_tail_auto=bool(params["flow_rho7_tail_auto"]),
+        final_clean_pass=bool(params["final_clean_pass"]),
         cosmos_sigma_max=float(params["cosmos_sigma_max"]),
         cosmos_sigma_min=float(params["cosmos_sigma_min"]),
         denoise_legacy_progress=bool(params["denoise_legacy_progress"]),
@@ -439,17 +783,20 @@ def _run_sampler_with_params(
         rf_endpoint_noise_refresh_until=float(params["rf_endpoint_noise_refresh_until"]),
         add_noise=add_noise,
         disable_pbar=disable_pbar,
+        collect_diagnostics=collect_diagnostics,
     )
 
 
 NODE_CLASS_MAPPINGS = {
     "AnimaFlowSettings": AnimaFlowSettings,
     "AnimaFlowCorrectiveSampler": AnimaFlowCorrectiveSampler,
+    "AnimaFourWayComparison": AnimaFourWayComparison,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AnimaFlowSettings": "Anima Flow Settings",
     "AnimaFlowCorrectiveSampler": "Anima Flow Corrective Sampler",
+    "AnimaFourWayComparison": "Anima Four Way Comparison",
 }
 
 
@@ -474,13 +821,50 @@ def _decode_latent_image(vae, latent: dict):
 
     samples = latent["samples"]
     ndim = int(getattr(samples, "ndim", len(samples.shape)))
+    latent_dim = _vae_latent_dim(vae)
+    expected_ndim = latent_dim + 2 if latent_dim is not None else None
+
+    if expected_ndim == 5:
+        if ndim == 4:
+            samples = samples.unsqueeze(2)
+        elif ndim == 5:
+            if int(samples.shape[2]) != 1:
+                raise ValueError("VAE image output requires a single-frame latent")
+        else:
+            raise ValueError("VAE image output requires a 4D or 5D latent")
+    elif expected_ndim == 4:
+        if ndim == 5:
+            if int(samples.shape[2]) != 1:
+                raise ValueError("VAE image output requires a single-frame latent")
+            samples = samples.squeeze(2)
+        elif ndim != 4:
+            raise ValueError("VAE image output requires a 4D or 5D latent")
+    elif ndim not in {4, 5}:
+        raise ValueError("VAE image output requires a 4D or 5D latent")
+
+    return _normalize_decoded_image(vae.decode(samples))
+
+
+def _vae_latent_dim(vae):
+    latent_dim = getattr(vae, "latent_dim", None)
+    if latent_dim is None:
+        return None
+    try:
+        return int(latent_dim)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_decoded_image(image):
+    ndim = int(getattr(image, "ndim", len(image.shape)))
     if ndim == 5:
-        if int(samples.shape[2]) != 1:
-            raise ValueError("VAE image output requires a single-frame latent")
-        samples = samples.squeeze(2)
-    elif ndim != 4:
-        raise ValueError("VAE image output requires a 4D image latent")
-    return vae.decode(samples)
+        if int(image.shape[1]) != 1:
+            raise ValueError("VAE image output requires a single-frame image")
+        image = image[:, 0]
+        ndim = 4
+    if ndim != 4:
+        raise ValueError("VAE image output requires a 4D image tensor")
+    return image
 
 
 def _apply_public_cfg_mode(params: dict, cfg_mode: str) -> dict:
@@ -488,6 +872,16 @@ def _apply_public_cfg_mode(params: dict, cfg_mode: str) -> dict:
     mode = str(cfg_mode).strip().lower()
     if mode == "bump cfg":
         out["cfg_schedule_mode"] = "beta_bump"
+    elif mode == "ramp cfg":
+        out["cfg_schedule_mode"] = "low_to_high"
+        out["cfg_early_scale"] = min(1.0, 4.5 / max(float(out["cfg"]), 1e-6))
+        out["cfg_early_ramp_end"] = 0.0
+        out["cfg_peak_boost"] = 0.0
+        out["cfg_interval_start"] = 0.24
+        out["cfg_interval_rise_end"] = 0.66
+        out["cfg_interval_fall_start"] = 1.0
+        out["cfg_interval_end"] = 1.0
+        out["late_cfg_scale"] = 1.0
     elif mode == "const":
         out["cfg_schedule_mode"] = "constant"
         out["cfg_early_scale"] = 1.0
@@ -508,8 +902,20 @@ def _normalize_flow_params(params: dict) -> dict:
     out["flow_er_order"] = int(out["flow_er_order"])
     out["flow_pc3_gamma"] = float(out["flow_pc3_gamma"])
     out["flow_pc3_tolerance"] = float(out["flow_pc3_tolerance"])
+    out["flow_unipc_order"] = int(out["flow_unipc_order"])
+    out["flow_unipc_solver_type"] = str(out["flow_unipc_solver_type"])
+    out["flow_unipc_lower_order_final"] = _as_bool(out["flow_unipc_lower_order_final"])
+    out["flow_unipc_disable_corrector_first"] = int(out["flow_unipc_disable_corrector_first"])
+    out["flow_unipc_thresholding"] = _as_bool(out["flow_unipc_thresholding"])
+    out["flow_unipc_dynamic_thresholding_ratio"] = float(out["flow_unipc_dynamic_thresholding_ratio"])
+    out["flow_unipc_sample_max_value"] = float(out["flow_unipc_sample_max_value"])
     out["flow_schedule"] = str(out["flow_schedule"])
+    if out["flow_schedule"] == "flow_cosmos_rho7_rf_tail_auto":
+        out["flow_schedule"] = "flow_cosmos_rho7"
+        out["flow_rho7_tail_auto"] = True
     out["flow_shift"] = float(out["flow_shift"])
+    out["flow_rho7_tail_auto"] = _as_bool(out["flow_rho7_tail_auto"])
+    out["final_clean_pass"] = _as_bool(out["final_clean_pass"])
     out["cosmos_sigma_max"] = float(out["cosmos_sigma_max"])
     out["cosmos_sigma_min"] = float(out["cosmos_sigma_min"])
     out["denoise_legacy_progress"] = _as_bool(out["denoise_legacy_progress"])
@@ -546,6 +952,16 @@ def _normalize_flow_params(params: dict) -> dict:
         raise ValueError("flow_pc3_gamma must be in the range [0, 1]")
     if not (0.0 < out["flow_pc3_tolerance"] <= 1.0):
         raise ValueError("flow_pc3_tolerance must be in the range (0, 1]")
+    if not (1 <= out["flow_unipc_order"] <= 6):
+        raise ValueError("flow_unipc_order must be in the range [1, 6]")
+    if out["flow_unipc_solver_type"] not in {"bh1", "bh2"}:
+        raise ValueError("flow_unipc_solver_type must be bh1 or bh2")
+    if not (0 <= out["flow_unipc_disable_corrector_first"] <= 10):
+        raise ValueError("flow_unipc_disable_corrector_first must be in the range [0, 10]")
+    if not (0.0 < out["flow_unipc_dynamic_thresholding_ratio"] <= 1.0):
+        raise ValueError("flow_unipc_dynamic_thresholding_ratio must be in the range (0, 1]")
+    if out["flow_unipc_sample_max_value"] < 1.0:
+        raise ValueError("flow_unipc_sample_max_value must be >= 1")
     if out["flow_schedule"] not in FLOW_SCHEDULES:
         raise ValueError(f"unsupported flow_schedule: {out['flow_schedule']}")
     if not math.isfinite(out["flow_shift"]) or out["flow_shift"] < 1.0:
@@ -601,13 +1017,10 @@ def _estimated_model_calls(settings: dict) -> int:
     if settings["flow_solver"] in {
         "flow_heun",
         "flow_pc3_damped",
-        "flow_pc3_fsal_gated",
     }:
-        return max(1, steps * 2 - 1)
-    if settings["flow_solver"] == "flow_3m_sparse_pc3_fsal":
-        sparse_budget = min(10, max(5, round(0.23 * steps)))
-        return max(1, steps + sparse_budget)
-    return steps
+        calls = max(1, steps * 2 - 1)
+        return calls + int(bool(settings["final_clean_pass"]))
+    return steps + int(bool(settings["final_clean_pass"]))
 
 
 def _format_settings_summary(settings: dict) -> str:
@@ -624,9 +1037,24 @@ def _format_settings_summary(settings: dict) -> str:
             f"sampler_default_flow_solver: {settings['flow_solver']}",
             f"sampler_default_flow_schedule: {settings['flow_schedule']}",
             f"sampler_default_flow_shift: {settings['flow_shift']:.4f}",
+            f"flow_rho7_tail_auto: {settings['flow_rho7_tail_auto']}",
+            f"final_clean_pass: {settings['final_clean_pass']}",
             f"flow_er_order: {settings['flow_er_order']}",
             f"flow_pc3_gamma: {settings['flow_pc3_gamma']:.4f}",
             f"flow_pc3_tolerance: {settings['flow_pc3_tolerance']:.6f}",
+            f"flow_unipc_order: {settings['flow_unipc_order']}",
+            f"flow_unipc_solver_type: {settings['flow_unipc_solver_type']}",
+            f"flow_unipc_lower_order_final: {settings['flow_unipc_lower_order_final']}",
+            (
+                "flow_unipc_disable_corrector_first: "
+                f"{settings['flow_unipc_disable_corrector_first']}"
+            ),
+            f"flow_unipc_thresholding: {settings['flow_unipc_thresholding']}",
+            (
+                "flow_unipc_dynamic_thresholding_ratio: "
+                f"{settings['flow_unipc_dynamic_thresholding_ratio']:.4f}"
+            ),
+            f"flow_unipc_sample_max_value: {settings['flow_unipc_sample_max_value']:.4f}",
             f"cosmos_sigma_max: {settings['cosmos_sigma_max']:.4f}",
             f"cosmos_sigma_min: {settings['cosmos_sigma_min']:.6f}",
             f"cfg_schedule_mode: {settings['cfg_schedule_mode']}",

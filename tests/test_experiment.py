@@ -41,6 +41,13 @@ class ExperimentHelperTests(unittest.TestCase):
             [True, False],
         )
 
+    def test_final_clean_pass_is_sweepable_bool(self):
+        self.assertIn("final_clean_pass", PARAMETER_SWEEP_KEYS)
+        self.assertEqual(
+            parse_sweep_values("true, false", "final_clean_pass", max_runs=8),
+            [True, False],
+        )
+
     def test_seed_and_steps_are_sweepable_integer_values(self):
         self.assertIn("seed", PARAMETER_SWEEP_KEYS)
         self.assertIn("steps", PARAMETER_SWEEP_KEYS)
@@ -77,7 +84,7 @@ class ExperimentHelperTests(unittest.TestCase):
         self.assertIn("cfg_schedule_mode", PARAMETER_SWEEP_KEYS)
         self.assertEqual(
             parse_sweep_values(
-                "beta_bump, limited_interval, legacy_boost, constant",
+                "beta_bump, low_to_high, limited_interval, legacy_boost, constant",
                 "cfg_schedule_mode",
                 max_runs=8,
             ),
@@ -125,20 +132,19 @@ class ExperimentHelperTests(unittest.TestCase):
         self.assertEqual(
             parse_sweep_values(
                 (
-                    "flow_euler, flow_heun, flow_pc3_damped, "
-                    "flow_pc3_fsal_gated, flow_3m_damped, "
-                    "flow_3m_sparse_pc3_fsal, flow_er"
+                    "flow_euler, flow_ab2, flow_heun, flow_pc3_damped, "
+                    "flow_3m_damped, flow_unipc2_x0, flow_er"
                 ),
                 "flow_solver",
-                max_runs=10,
+                max_runs=12,
             ),
             [
                 "flow_euler",
+                "flow_ab2",
                 "flow_heun",
                 "flow_pc3_damped",
-                "flow_pc3_fsal_gated",
                 "flow_3m_damped",
-                "flow_3m_sparse_pc3_fsal",
+                "flow_unipc2_x0",
                 "flow_er",
             ],
         )
@@ -151,16 +157,20 @@ class ExperimentHelperTests(unittest.TestCase):
         self.assertEqual(
             parse_sweep_values(
                 (
-                    "flow_cosmos, flow_cosmos_lambda_biased_strong, "
-                    "flow_cosmos_rho7_rf_tail_auto, simple"
+                    "flow_cosmos, flow_cosmos_rf_tail, flow_cosmos_lambda_biased_strong, "
+                    "flow_cosmos_rho7, flow_rf_linear_shift, "
+                    "flow_rf_linear_s_tail_shift5, simple"
                 ),
                 "flow_schedule",
                 max_runs=12,
             ),
             [
                 "flow_cosmos",
+                "flow_cosmos_rf_tail",
                 "flow_cosmos_lambda_biased_strong",
-                "flow_cosmos_rho7_rf_tail_auto",
+                "flow_cosmos_rho7",
+                "flow_rf_linear_shift",
+                "flow_rf_linear_s_tail_shift5",
                 "simple",
             ],
         )
@@ -169,7 +179,7 @@ class ExperimentHelperTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_sweep_values("flowmatch_euler", "flow_schedule", max_runs=8)
         with self.assertRaises(ValueError):
-            parse_sweep_values("flow_cosmos_rho7", "flow_schedule", max_runs=8)
+            parse_sweep_values("flow_cosmos_rho7_rf_tail_auto", "flow_schedule", max_runs=8)
         with self.assertRaises(ValueError):
             parse_sweep_values("flow_cosmos_rho7_rf_tail_balanced", "flow_schedule", max_runs=8)
         with self.assertRaises(ValueError):
@@ -213,23 +223,18 @@ class ExperimentHelperTests(unittest.TestCase):
             ],
         )
 
-    def test_build_parameter_combinations_allows_rho7_auto_schedule_with_main_solvers(self):
+    def test_build_parameter_combinations_allows_rho7_schedule_with_tail_auto_sweep(self):
         self.assertEqual(
             build_parameter_combinations(
                 "flow_schedule",
-                "flow_cosmos, flow_cosmos_rho7_rf_tail_auto",
-                "flow_solver",
-                "flow_er, flow_pc3_damped",
+                "flow_cosmos_rho7",
+                "flow_rho7_tail_auto",
+                "false, true",
                 max_runs=8,
             ),
             [
-                {"flow_schedule": "flow_cosmos", "flow_solver": "flow_er"},
-                {"flow_schedule": "flow_cosmos_rho7_rf_tail_auto", "flow_solver": "flow_er"},
-                {"flow_schedule": "flow_cosmos", "flow_solver": "flow_pc3_damped"},
-                {
-                    "flow_schedule": "flow_cosmos_rho7_rf_tail_auto",
-                    "flow_solver": "flow_pc3_damped",
-                },
+                {"flow_schedule": "flow_cosmos_rho7", "flow_rho7_tail_auto": False},
+                {"flow_schedule": "flow_cosmos_rho7", "flow_rho7_tail_auto": True},
             ],
         )
 
