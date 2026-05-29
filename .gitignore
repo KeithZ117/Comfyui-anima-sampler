@@ -31,6 +31,8 @@ temp/
 # Local reference material and scratch notes
 user_input/
 docs/
+cosmos-predict2/
+cosmos-predict2.5/
 AGENT.md
 AGENTS.md
 docs/anima-corrective-sampling-discussion.md
