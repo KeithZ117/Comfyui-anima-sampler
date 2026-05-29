@@ -1,0 +1,10 @@
+docs/
+tests/
+cosmos-predict2/
+cosmos-predict2.5/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.csv
+*.log

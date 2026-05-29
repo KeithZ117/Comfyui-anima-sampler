@@ -1,0 +1,15 @@
+[project]
+name = "anima-sampler"
+description = "Cosmos-style rectified-flow sampler nodes for Anima models in ComfyUI."
+version = "0.1.0"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/KeithZ117/Comfyui-anima-sampler"
+"Bug Tracker" = "https://github.com/KeithZ117/Comfyui-anima-sampler/issues"
+
+[tool.comfy]
+PublisherId = "aizen"
+DisplayName = "Anima Sampler"
