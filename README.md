@@ -33,11 +33,11 @@ in ComfyUI to inspect the example workflow.
 
 | UniPC, linear shift5, const CFG 7 | PC3, linear shift5, const CFG 7 |
 | --- | --- |
-| <img src="examples/comparison/unipc_linear_shift_cfg7.png" alt="UniPC linear shift CFG 7 example" width="260"> | <img src="examples/comparison/pc3_linear_shift_cfg7.png" alt="PC3 linear shift CFG 7 example" width="260"> |
+| <img src="https://raw.githubusercontent.com/KeithZ117/Comfyui-anima-sampler/main/examples/comparison/unipc_linear_shift_cfg7.jpg" alt="UniPC linear shift CFG 7 example" width="260"> | <img src="https://raw.githubusercontent.com/KeithZ117/Comfyui-anima-sampler/main/examples/comparison/pc3_linear_shift_cfg7.jpg" alt="PC3 linear shift CFG 7 example" width="260"> |
 
 | er_sde + simple, CFG 4.5 | er_sde + simple, CFG 7 |
 | --- | --- |
-| <img src="examples/comparison/er_sde_simple_cfg45.png" alt="er_sde simple CFG 4.5 example" width="260"> | <img src="examples/comparison/er_sde_simple_cfg7.png" alt="er_sde simple CFG 7 example" width="260"> |
+| <img src="https://raw.githubusercontent.com/KeithZ117/Comfyui-anima-sampler/main/examples/comparison/er_sde_simple_cfg45.jpg" alt="er_sde simple CFG 4.5 example" width="260"> | <img src="https://raw.githubusercontent.com/KeithZ117/Comfyui-anima-sampler/main/examples/comparison/er_sde_simple_cfg7.jpg" alt="er_sde simple CFG 7 example" width="260"> |
 
 ## Nodes
 
@@ -65,7 +65,19 @@ the early high-noise phase, and reaches `7` before the tail/detail phase.
 
 ## Install
 
-Clone or copy this repository into ComfyUI's `custom_nodes` directory:
+Install with ComfyUI-Manager when the node is available in the registry, or
+install directly from GitHub.
+
+GitHub install:
+
+```powershell
+cd ComfyUI/custom_nodes
+git clone https://github.com/KeithZ117/Comfyui-anima-sampler.git
+```
+
+Manual install:
+
+Copy this repository into ComfyUI's `custom_nodes` directory:
 
 ```text
 ComfyUI/custom_nodes/Comfyui-anima-sampler

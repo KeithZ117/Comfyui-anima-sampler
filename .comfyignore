@@ -1,5 +1,6 @@
 docs/
 tests/
+examples/comparison/
 cosmos-predict2/
 cosmos-predict2.5/
 __pycache__/
@@ -8,3 +9,4 @@ __pycache__/
 .ruff_cache/
 *.csv
 *.log
+node.zip

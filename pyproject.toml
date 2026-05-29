@@ -1,7 +1,7 @@
 [project]
 name = "anima-sampler"
 description = "Cosmos-style rectified-flow sampler nodes for Anima models in ComfyUI."
-version = "0.1.0"
+version = "0.1.1"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = []
