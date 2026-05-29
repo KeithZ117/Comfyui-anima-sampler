@@ -14,9 +14,10 @@ from .flow_sampler import (
 )
 
 ANIMA_FLOW_SETTINGS = "ANIMA_FLOW_SETTINGS"
+NODE_CATEGORY = "anima sampler"
 DEFAULT_FLOW_SCHEDULE = "flow_rf_linear_shift"
 DEFAULT_PUBLIC_CFG_MODE = "const"
-PUBLIC_CFG_MODES = ["const", "bump cfg"]
+PUBLIC_CFG_MODES = ["const", "bump cfg", "ramp cfg"]
 NO_FINAL_CLEAN_DISCONNECTED_SCHEDULES = {
     "flow_rf_linear_shift",
     "flow_rf_linear_s_tail_shift5",
@@ -288,7 +289,7 @@ class AnimaFlowSettings:
     RETURN_TYPES = (ANIMA_FLOW_SETTINGS, "STRING")
     RETURN_NAMES = ("settings", "summary")
     FUNCTION = "build"
-    CATEGORY = "Anima/Error Corrective Sampling"
+    CATEGORY = NODE_CATEGORY
 
     def build(
         self,
@@ -425,7 +426,7 @@ class AnimaFlowCorrectiveSampler:
     RETURN_TYPES = ("LATENT", "IMAGE", "STRING")
     RETURN_NAMES = ("latent", "image", "log")
     FUNCTION = "sample"
-    CATEGORY = "Anima/Error Corrective Sampling"
+    CATEGORY = NODE_CATEGORY
 
     def sample(
         self,
@@ -477,67 +478,8 @@ class AnimaFlowCorrectiveSampler:
         return latent_out, image, log
 
 
-class AnimaFlowDiagnosticSampler(AnimaFlowCorrectiveSampler):
-    """Sampler variant that exports per-step solver diagnostics as CSV."""
-
-    RETURN_TYPES = ("LATENT", "IMAGE", "STRING", "STRING")
-    RETURN_NAMES = ("latent", "image", "log", "trace_csv")
-    FUNCTION = "sample"
-    CATEGORY = "Anima/Local Tests"
-
-    def sample(
-        self,
-        model,
-        positive,
-        negative,
-        latent_image,
-        seed,
-        steps,
-        cfg,
-        cfg_mode,
-        flow_solver,
-        flow_schedule,
-        flow_shift,
-        denoise,
-        add_noise,
-        flow_settings=None,
-        vae=None,
-    ):
-        base_params = _normalize_settings_object(flow_settings)
-        params = _normalize_flow_params(
-            {
-                **base_params,
-                "seed": seed,
-                "steps": steps,
-                "cfg": cfg,
-                "flow_solver": flow_solver,
-                "flow_schedule": flow_schedule,
-                "flow_shift": flow_shift,
-            }
-        )
-        params = _apply_disconnected_sampler_defaults(params, flow_settings)
-        params = _apply_public_cfg_mode(params, cfg_mode)
-        latent_out, log, trace_csv = _run_sampler_with_params(
-            model=model,
-            positive=positive,
-            negative=negative,
-            latent_image=latent_image,
-            params=params,
-            denoise=denoise,
-            add_noise=add_noise,
-            disable_pbar=False,
-            collect_diagnostics=True,
-        )
-        image = _decode_latent_image(vae, latent_out)
-        if vae is None:
-            log = f"{log}\nimage_output: unavailable (connect VAE)"
-        else:
-            log = f"{log}\nimage_output: decoded with connected VAE"
-        return latent_out, image, log, trace_csv
-
-
-class AnimaBestVsErSdeSimpleComparison:
-    """Run the packaged best sampler against native er_sde + simple."""
+class AnimaFourWayComparison:
+    """Generate a fixed four-way comparison grid for final sampler checks."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -564,19 +506,37 @@ class AnimaBestVsErSdeSimpleComparison:
                         "max": 1000,
                     },
                 ),
-                "best_cfg": (
+                "unipc_cfg": (
                     "FLOAT",
                     {
-                        "default": ANIMA_FLOW_BASELINE["cfg"],
+                        "default": 7.0,
                         "min": 0.0,
                         "max": 30.0,
                         "step": 0.1,
                     },
                 ),
-                "er_cfg": (
+                "pc3_cfg": (
+                    "FLOAT",
+                    {
+                        "default": 7.0,
+                        "min": 0.0,
+                        "max": 30.0,
+                        "step": 0.1,
+                    },
+                ),
+                "er_official_cfg": (
                     "FLOAT",
                     {
                         "default": 4.5,
+                        "min": 0.0,
+                        "max": 30.0,
+                        "step": 0.1,
+                    },
+                ),
+                "er_high_cfg": (
+                    "FLOAT",
+                    {
+                        "default": 7.0,
                         "min": 0.0,
                         "max": 30.0,
                         "step": 0.1,
@@ -595,17 +555,17 @@ class AnimaBestVsErSdeSimpleComparison:
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "LATENT", "LATENT", "STRING")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "STRING")
     RETURN_NAMES = (
         "comparison",
-        "best_image",
-        "er_sde_simple_image",
-        "best_latent",
-        "er_sde_simple_latent",
+        "unipc_image",
+        "pc3_image",
+        "er_sde_simple_cfg45_image",
+        "er_sde_simple_cfg7_image",
         "log",
     )
     FUNCTION = "compare"
-    CATEGORY = "Anima/Local Tests"
+    CATEGORY = NODE_CATEGORY
 
     def compare(
         self,
@@ -616,43 +576,68 @@ class AnimaBestVsErSdeSimpleComparison:
         vae,
         seed,
         steps,
-        best_cfg,
-        er_cfg,
+        unipc_cfg,
+        pc3_cfg,
+        er_official_cfg,
+        er_high_cfg,
         denoise,
         add_noise,
     ):
-        best_params = _normalize_flow_params(
-            {
-                **ANIMA_FLOW_BASELINE,
-                "seed": seed,
-                "steps": steps,
-                "cfg": best_cfg,
-                "flow_solver": "flow_unipc2_x0",
-                "flow_schedule": "flow_rf_linear_shift",
-                "flow_shift": 5.0,
-                "final_clean_pass": False,
-            }
+        unipc_params = _constant_linear_shift_profile(
+            seed=seed,
+            steps=steps,
+            cfg=unipc_cfg,
+            flow_solver="flow_unipc2_x0",
         )
-        best_params = _apply_public_cfg_mode(best_params, DEFAULT_PUBLIC_CFG_MODE)
+        pc3_params = _constant_linear_shift_profile(
+            seed=seed,
+            steps=steps,
+            cfg=pc3_cfg,
+            flow_solver="flow_pc3_damped",
+        )
 
-        best_latent, best_log = _run_sampler_with_params(
+        unipc_latent, unipc_log = _run_sampler_with_params(
             model=model,
             positive=positive,
             negative=negative,
             latent_image=latent_image,
-            params=best_params,
+            params=unipc_params,
             denoise=denoise,
             add_noise=add_noise,
             disable_pbar=False,
         )
-        er_latent, er_log = run_comfy_native_sampler(
+        pc3_latent, pc3_log = _run_sampler_with_params(
+            model=model,
+            positive=positive,
+            negative=negative,
+            latent_image=latent_image,
+            params=pc3_params,
+            denoise=denoise,
+            add_noise=add_noise,
+            disable_pbar=False,
+        )
+        er_official_latent, er_official_log = run_comfy_native_sampler(
             model=model,
             positive=positive,
             negative=negative,
             latent=latent_image,
             seed=int(seed),
             steps=int(steps),
-            cfg=float(er_cfg),
+            cfg=float(er_official_cfg),
+            denoise=float(denoise),
+            sampler_name="er_sde",
+            scheduler="simple",
+            add_noise=bool(add_noise),
+            disable_pbar=False,
+        )
+        er_high_latent, er_high_log = run_comfy_native_sampler(
+            model=model,
+            positive=positive,
+            negative=negative,
+            latent=latent_image,
+            seed=int(seed),
+            steps=int(steps),
+            cfg=float(er_high_cfg),
             denoise=float(denoise),
             sampler_name="er_sde",
             scheduler="simple",
@@ -660,40 +645,56 @@ class AnimaBestVsErSdeSimpleComparison:
             disable_pbar=False,
         )
 
-        best_image = _decode_latent_image(vae, best_latent)
-        er_image = _decode_latent_image(vae, er_latent)
+        unipc_image = _decode_latent_image(vae, unipc_latent)
+        pc3_image = _decode_latent_image(vae, pc3_latent)
+        er_official_image = _decode_latent_image(vae, er_official_latent)
+        er_high_image = _decode_latent_image(vae, er_high_latent)
         comparison = build_labeled_comparison_grid(
-            [best_image, er_image],
+            [unipc_image, pc3_image, er_official_image, er_high_image],
             [
-                "best: unipc2_x0 + flow_rf_linear_shift + shift5 + const cfg",
-                "baseline: er_sde + simple",
+                f"UniPC + linear shift5 + const cfg {float(unipc_cfg):.2f}",
+                f"PC3 + linear shift5 + const cfg {float(pc3_cfg):.2f}",
+                f"er_sde + simple cfg {float(er_official_cfg):.2f}",
+                f"er_sde + simple cfg {float(er_high_cfg):.2f}",
             ],
             columns=2,
-            label_height=48,
+            label_height=64,
             gap=8,
         )
 
         log = "\n\n".join(
             [
-                "AnimaBestVsErSdeSimpleComparison",
-                (
-                    "best_profile: flow_unipc2_x0 + flow_rf_linear_shift + "
-                    "flow_shift=5.0 + const cfg"
-                ),
-                "baseline_profile: er_sde + simple",
+                "AnimaFourWayComparison",
+                "profile_a: flow_unipc2_x0 + flow_rf_linear_shift + flow_shift=5.0 + const cfg",
+                "profile_b: flow_pc3_damped + flow_rf_linear_shift + flow_shift=5.0 + const cfg",
+                "profile_c: er_sde + simple",
+                "profile_d: er_sde + simple",
                 f"seed: {int(seed)}",
                 f"steps: {int(steps)}",
-                f"best_cfg: {float(best_cfg):.4f}",
-                f"er_cfg: {float(er_cfg):.4f}",
+                f"unipc_cfg: {float(unipc_cfg):.4f}",
+                f"pc3_cfg: {float(pc3_cfg):.4f}",
+                f"er_official_cfg: {float(er_official_cfg):.4f}",
+                f"er_high_cfg: {float(er_high_cfg):.4f}",
                 f"denoise: {float(denoise):.4f}",
                 f"add_noise: {bool(add_noise)}",
-                "best_log:",
-                best_log,
-                "er_sde_simple_log:",
-                er_log,
+                "unipc_log:",
+                unipc_log,
+                "pc3_log:",
+                pc3_log,
+                "er_sde_simple_cfg45_log:",
+                er_official_log,
+                "er_sde_simple_cfg7_log:",
+                er_high_log,
             ]
         )
-        return comparison, best_image, er_image, best_latent, er_latent, log
+        return (
+            comparison,
+            unipc_image,
+            pc3_image,
+            er_official_image,
+            er_high_image,
+            log,
+        )
 
 
 def _apply_disconnected_sampler_defaults(params: dict, flow_settings) -> dict:
@@ -703,6 +704,22 @@ def _apply_disconnected_sampler_defaults(params: dict, flow_settings) -> dict:
             out["flow_schedule"] not in NO_FINAL_CLEAN_DISCONNECTED_SCHEDULES
         )
     return _normalize_flow_params(out)
+
+
+def _constant_linear_shift_profile(*, seed, steps, cfg, flow_solver: str) -> dict:
+    params = _normalize_flow_params(
+        {
+            **ANIMA_FLOW_BASELINE,
+            "seed": seed,
+            "steps": steps,
+            "cfg": cfg,
+            "flow_solver": flow_solver,
+            "flow_schedule": "flow_rf_linear_shift",
+            "flow_shift": 5.0,
+            "final_clean_pass": False,
+        }
+    )
+    return _apply_public_cfg_mode(params, "const")
 
 
 def _run_sampler_with_params(
@@ -773,15 +790,13 @@ def _run_sampler_with_params(
 NODE_CLASS_MAPPINGS = {
     "AnimaFlowSettings": AnimaFlowSettings,
     "AnimaFlowCorrectiveSampler": AnimaFlowCorrectiveSampler,
-    "AnimaFlowDiagnosticSampler": AnimaFlowDiagnosticSampler,
-    "AnimaBestVsErSdeSimpleComparison": AnimaBestVsErSdeSimpleComparison,
+    "AnimaFourWayComparison": AnimaFourWayComparison,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AnimaFlowSettings": "Anima Flow Settings",
     "AnimaFlowCorrectiveSampler": "Anima Flow Corrective Sampler",
-    "AnimaFlowDiagnosticSampler": "Anima Flow Diagnostic Sampler",
-    "AnimaBestVsErSdeSimpleComparison": "Anima Best vs ER SDE Simple Comparison",
+    "AnimaFourWayComparison": "Anima Four Way Comparison",
 }
 
 
@@ -857,6 +872,16 @@ def _apply_public_cfg_mode(params: dict, cfg_mode: str) -> dict:
     mode = str(cfg_mode).strip().lower()
     if mode == "bump cfg":
         out["cfg_schedule_mode"] = "beta_bump"
+    elif mode == "ramp cfg":
+        out["cfg_schedule_mode"] = "low_to_high"
+        out["cfg_early_scale"] = min(1.0, 4.5 / max(float(out["cfg"]), 1e-6))
+        out["cfg_early_ramp_end"] = 0.0
+        out["cfg_peak_boost"] = 0.0
+        out["cfg_interval_start"] = 0.24
+        out["cfg_interval_rise_end"] = 0.66
+        out["cfg_interval_fall_start"] = 1.0
+        out["cfg_interval_end"] = 1.0
+        out["late_cfg_scale"] = 1.0
     elif mode == "const":
         out["cfg_schedule_mode"] = "constant"
         out["cfg_early_scale"] = 1.0
@@ -992,13 +1017,8 @@ def _estimated_model_calls(settings: dict) -> int:
     if settings["flow_solver"] in {
         "flow_heun",
         "flow_pc3_damped",
-        "flow_pc3_fsal_gated",
     }:
         calls = max(1, steps * 2 - 1)
-        return calls + int(bool(settings["final_clean_pass"]))
-    if settings["flow_solver"] == "flow_3m_sparse_pc3_fsal":
-        sparse_budget = min(10, max(5, round(0.23 * steps)))
-        calls = max(1, steps + sparse_budget)
         return calls + int(bool(settings["final_clean_pass"]))
     return steps + int(bool(settings["final_clean_pass"]))
 

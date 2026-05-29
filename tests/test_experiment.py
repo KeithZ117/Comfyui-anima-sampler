@@ -84,7 +84,7 @@ class ExperimentHelperTests(unittest.TestCase):
         self.assertIn("cfg_schedule_mode", PARAMETER_SWEEP_KEYS)
         self.assertEqual(
             parse_sweep_values(
-                "beta_bump, limited_interval, legacy_boost, constant",
+                "beta_bump, low_to_high, limited_interval, legacy_boost, constant",
                 "cfg_schedule_mode",
                 max_runs=8,
             ),
@@ -133,8 +133,7 @@ class ExperimentHelperTests(unittest.TestCase):
             parse_sweep_values(
                 (
                     "flow_euler, flow_ab2, flow_heun, flow_pc3_damped, "
-                    "flow_pc3_fsal_gated, flow_3m_damped, "
-                    "flow_3m_sparse_pc3_fsal, flow_unipc2_x0, flow_er"
+                    "flow_3m_damped, flow_unipc2_x0, flow_er"
                 ),
                 "flow_solver",
                 max_runs=12,
@@ -144,9 +143,7 @@ class ExperimentHelperTests(unittest.TestCase):
                 "flow_ab2",
                 "flow_heun",
                 "flow_pc3_damped",
-                "flow_pc3_fsal_gated",
                 "flow_3m_damped",
-                "flow_3m_sparse_pc3_fsal",
                 "flow_unipc2_x0",
                 "flow_er",
             ],

@@ -1,7 +1,16 @@
 # ComfyUI Anima Flow Corrective Sampler
 
 Custom ComfyUI sampler nodes for Anima / Cosmos-style rectified-flow image
-models. The default profile packages the current tested Anima workflow:
+models. It packages a Cosmos-aligned RF linear shift schedule with UniPC and
+PC3 solver options for stronger structure, spatial consistency, and detail
+retention in ComfyUI.
+
+This is an independent implementation, not an official NVIDIA or CircleStone
+Labs release. The design is aligned with public Cosmos / Cosmos Predict2.5
+pipeline ideas such as rectified-flow scheduling and UniPC-style
+predictor-corrector sampling.
+
+The default profile packages the current tested Anima workflow:
 
 ```text
 solver        = flow_unipc2_x0
@@ -15,14 +24,36 @@ cfg_mode      = const
 The goal is to improve prompt structure, spatial relationships, and detail
 stability while keeping the node surface small enough for daily use.
 
+## Example Output
+
+The files below were generated from the same prompt family and are included as
+single-image examples instead of a four-way grid. Import
+[`examples/workflows/anima_better_sampler.json`](examples/workflows/anima_better_sampler.json)
+in ComfyUI to inspect the example workflow.
+
+**UniPC, linear shift5, const CFG 7**
+
+<img src="examples/comparison/unipc_linear_shift_cfg7.png" alt="UniPC linear shift CFG 7 example" width="520">
+
+**PC3, linear shift5, const CFG 7**
+
+<img src="examples/comparison/pc3_linear_shift_cfg7.png" alt="PC3 linear shift CFG 7 example" width="520">
+
+**er_sde + simple, CFG 4.5**
+
+<img src="examples/comparison/er_sde_simple_cfg45.png" alt="er_sde simple CFG 4.5 example" width="520">
+
+**er_sde + simple, CFG 7**
+
+<img src="examples/comparison/er_sde_simple_cfg7.png" alt="er_sde simple CFG 7 example" width="520">
+
 ## Nodes
 
 - `Anima Flow Corrective Sampler`: the main sampler node.
 - `Anima Flow Settings`: optional advanced controls for solver and CFG tuning.
-- `Anima Flow Diagnostic Sampler`: same sampler surface as the main node, plus
-  a CSV trace output for per-step solver diagnostics.
-- `Anima Best vs ER SDE Simple Comparison`: matched-seed comparison between
-  the packaged default and `er_sde + simple`.
+- `Anima Four Way Comparison`: fixed four-way image grid for UniPC linear
+  shift cfg7, PC3 linear shift cfg7, `er_sde + simple` cfg4.5, and
+  `er_sde + simple` cfg7.
 
 The sampler works without connecting `Anima Flow Settings`; the tested defaults
 are built in. Connect the settings node only when you want to tune advanced
@@ -32,14 +63,13 @@ The sampler outputs both `LATENT` and `IMAGE`. Connect a `VAE` to the optional
 `vae` input when you want the image output decoded directly from the sampler.
 Leave `vae` disconnected when you only need the latent output.
 
-The comparison node requires a `VAE` and outputs a labeled side-by-side image,
-the two individual images, both latents, and a log. It uses separate CFG inputs:
-`best_cfg` defaults to `7.0`, while `er_cfg` defaults to `4.5`.
+The four-way comparison node requires a `VAE` and outputs a labeled comparison
+image, four individual images, and a log. It is intended for quick visual checks
+against the native `er_sde + simple` baseline.
 
-The diagnostic node is intended for local experiments. Its `trace_csv` output
-records one row per sampler step with timestep, lambda gap, CFG, cache use,
-model-call counts, predictor/corrector order, PC3 gamma, update norm, and
-correction norm.
+`ramp cfg` starts guidance low and smoothly raises it to the selected `cfg`.
+With the default `cfg=7`, it starts near `4.5`, keeps that low guidance through
+the early high-noise phase, and reaches `7` before the tail/detail phase.
 
 ## Install
 
@@ -64,7 +94,7 @@ Everyday controls:
 
 - `steps`: default `35`
 - `cfg`: default `7.0`
-- `cfg_mode`: `const` or `bump cfg`
+- `cfg_mode`: `const`, `bump cfg`, or `ramp cfg`
 - `flow_solver`: default `flow_unipc2_x0`
 - `flow_schedule`: default `flow_rf_linear_shift`
 - `flow_shift`: default `5.0` and used by shift-aware schedules such as
@@ -140,6 +170,12 @@ Run the local test suite from the repository root:
 ```text
 python -m unittest discover -s tests
 ```
+
+## References
+
+- NVIDIA Cosmos Predict2: https://github.com/nvidia-cosmos/cosmos-predict2
+- NVIDIA Cosmos Predict2.5: https://github.com/nvidia-cosmos/cosmos-predict2.5
+- UniPC paper: https://arxiv.org/abs/2302.04867
 
 ## License
 

@@ -76,3 +76,7 @@ ComfyUI_windows_portable/
 *.mp4
 *.mov
 *.avi
+
+# Curated release examples
+!examples/
+!examples/**

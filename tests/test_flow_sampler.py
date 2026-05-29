@@ -16,7 +16,6 @@ from anima_sampler.flow_sampler import (
     _describe_model_sampling_shift,
     _hybrid_tail_start_step,
     _infer_cosmos_latent_channels,
-    _pc3_fsal_cache_score,
     _randn_like,
     _restore_sampler_channels,
     build_anima_sigmas,
@@ -46,10 +45,10 @@ class FlowSamplerScheduleTests(unittest.TestCase):
         self.assertIn("flow_ab2", FLOW_SOLVERS)
         self.assertIn("flow_heun", FLOW_SOLVERS)
         self.assertIn("flow_pc3_damped", FLOW_SOLVERS)
-        self.assertIn("flow_pc3_fsal_gated", FLOW_SOLVERS)
         self.assertIn("flow_3m_damped", FLOW_SOLVERS)
-        self.assertIn("flow_3m_sparse_pc3_fsal", FLOW_SOLVERS)
         self.assertIn("flow_unipc2_x0", FLOW_SOLVERS)
+        self.assertNotIn("flow_pc3_fsal_gated", FLOW_SOLVERS)
+        self.assertNotIn("flow_3m_sparse_pc3_fsal", FLOW_SOLVERS)
         self.assertNotIn("flow_rho7_euler", FLOW_SOLVERS)
 
     def test_sampler_log_explains_steps_and_estimated_calls(self):
@@ -59,24 +58,6 @@ class FlowSamplerScheduleTests(unittest.TestCase):
         self.assertIn("steps_semantics: RF integration intervals", log.as_text())
         self.assertIn("estimated_model_calls: 24", log.as_text())
         self.assertIn("final_clean_pass: True", log.as_text())
-
-        actual_log = _dummy_sampler_log(
-            actual_steps=12,
-            sampler_core="flow_pc3_fsal_gated",
-            actual_model_calls=43,
-            cache_candidates=10,
-            cache_accepts=6,
-            cache_rejects=4,
-            pc3_used_total=11,
-        )
-        self.assertIn("actual_model_calls: 43", actual_log.as_text())
-        self.assertIn("cache_accept_rate: 0.6000", actual_log.as_text())
-
-        sparse_log = _dummy_sampler_log(
-            actual_steps=35,
-            sampler_core="flow_3m_sparse_pc3_fsal",
-        )
-        self.assertEqual(sparse_log.estimated_model_calls(), 44)
 
         three_m_log = _dummy_sampler_log(
             actual_steps=12,
@@ -92,6 +73,7 @@ class FlowSamplerScheduleTests(unittest.TestCase):
 
     def test_beta_bump_cfg_schedule_mode_is_default_option(self):
         self.assertEqual(CFG_SCHEDULE_MODES[0], "beta_bump")
+        self.assertIn("low_to_high", CFG_SCHEDULE_MODES)
         self.assertIn("legacy_boost", CFG_SCHEDULE_MODES)
         self.assertIn("constant", CFG_SCHEDULE_MODES)
 
@@ -482,6 +464,36 @@ class FlowSamplerScheduleTests(unittest.TestCase):
         self.assertAlmostEqual(cfg_plateau, 6.8)
         self.assertAlmostEqual(cfg_after, 6.0)
 
+    def test_low_to_high_cfg_uses_smooth_ramp(self):
+        cfg_start = cfg_at_progress(
+            0.0,
+            base_cfg=7.0,
+            cfg_schedule_mode="low_to_high",
+            cfg_early_scale=4.5 / 7.0,
+            cfg_interval_start=0.24,
+            cfg_interval_rise_end=0.66,
+        )
+        cfg_mid = cfg_at_progress(
+            0.45,
+            base_cfg=7.0,
+            cfg_schedule_mode="low_to_high",
+            cfg_early_scale=4.5 / 7.0,
+            cfg_interval_start=0.24,
+            cfg_interval_rise_end=0.66,
+        )
+        cfg_end = cfg_at_progress(
+            0.8,
+            base_cfg=7.0,
+            cfg_schedule_mode="low_to_high",
+            cfg_early_scale=4.5 / 7.0,
+            cfg_interval_start=0.24,
+            cfg_interval_rise_end=0.66,
+        )
+
+        self.assertAlmostEqual(cfg_start, 4.5, places=4)
+        self.assertAlmostEqual(cfg_mid, 5.75, places=4)
+        self.assertAlmostEqual(cfg_end, 7.0, places=4)
+
     def test_constant_cfg_ignores_curve_parameters(self):
         cfg = cfg_at_progress(
             0.28,
@@ -817,7 +829,7 @@ class FlowSamplerScheduleTests(unittest.TestCase):
         self.assertFalse(torch.allclose(out, x_predictor))
         self.assertTrue(torch.equal(state.previous_denoised, denoised))
 
-    def test_flow_pc3_result_exposes_cache_metrics_inputs(self):
+    def test_flow_pc3_result_exposes_predictor_corrector_diagnostics(self):
         x = torch.tensor([10.0])
         denoised = torch.tensor([2.0])
         denoised_pred = torch.tensor([4.0])
@@ -975,6 +987,7 @@ class FlowSamplerScheduleTests(unittest.TestCase):
         self.assertEqual(second.corrector_order, 1)
         self.assertEqual(second.predictor_order, 2)
         self.assertFalse(torch.allclose(second.x_corrected, first.x))
+        self.assertFalse(torch.allclose(second.x, second.x_predictor))
         self.assertIsNotNone(second.state.previous_previous_denoised)
 
     def test_flow_unipc2_x0_constant_x0_stays_on_euler_path(self):
@@ -996,6 +1009,7 @@ class FlowSamplerScheduleTests(unittest.TestCase):
 
         self.assertEqual(second.predictor_order, 2)
         self.assertTrue(torch.allclose(second.x_corrected, first.x, atol=1e-6))
+        self.assertTrue(torch.allclose(second.x_predictor, expected, atol=1e-6))
         self.assertTrue(torch.allclose(second.x, expected, atol=1e-6))
 
     def test_flow_unipc2_x0_terminal_step_returns_current_x0(self):
@@ -1155,44 +1169,6 @@ class FlowSamplerScheduleTests(unittest.TestCase):
 
         self.assertEqual(third.corrector_order, 2)
         self.assertEqual(third.predictor_order, 3)
-
-    def test_pc3_fsal_cache_score_accepts_small_endpoint_correction(self):
-        x_pred = torch.ones(1, 4, 2, 2)
-        x_predictor = x_pred + 0.0001
-        x_corrected = x_predictor + 0.00005
-        x_next = x_predictor + 0.00002
-
-        score, e_x, e_pc3 = _pc3_fsal_cache_score(
-            torch,
-            x_pred=x_pred,
-            x_next=x_next,
-            x_predictor=x_predictor,
-            x_corrected=x_corrected,
-            t_next=torch.tensor(0.5),
-            tolerance=0.005,
-        )
-
-        self.assertLess(score, 1.0)
-        self.assertLess(e_x, 0.001)
-        self.assertLess(e_pc3, 0.001)
-
-    def test_pc3_fsal_cache_score_rejects_large_endpoint_correction(self):
-        x_pred = torch.ones(1, 4, 2, 2)
-        x_predictor = x_pred + 0.2
-        x_corrected = x_predictor + 0.2
-        x_next = x_corrected
-
-        score, _e_x, _e_pc3 = _pc3_fsal_cache_score(
-            torch,
-            x_pred=x_pred,
-            x_next=x_next,
-            x_predictor=x_predictor,
-            x_corrected=x_corrected,
-            t_next=torch.tensor(0.1),
-            tolerance=0.005,
-        )
-
-        self.assertGreaterEqual(score, 1.0)
 
     def test_rf_endpoint_noise_refresh_refreshes_endpoint_noise(self):
         x = torch.tensor([10.0])
