@@ -86,7 +86,7 @@ Everyday controls:
 
 - `steps`: default `35`
 - `cfg`: default `7.0`
-- `cfg_mode`: `const`, `bump cfg`, or `ramp cfg`
+- `cfg_mode`: recommended `const` or `ramp cfg`
 - `flow_solver`: default `flow_unipc2_x0`
 - `flow_schedule`: default `flow_rf_linear_shift`
 - `flow_shift`: default `5.0` and used by shift-aware schedules such as
@@ -122,6 +122,10 @@ baked into the preset name.
 The packaged default now follows the Cosmos 2.5-style path:
 `flow_unipc2_x0 + flow_rf_linear_shift + flow_shift 5.0 + const cfg 7.0`,
 with no final clean pass when the settings node is disconnected.
+
+For maximum quality, my preferred profile is
+`flow_pc3_damped + flow_rf_linear_shift + flow_shift 5.0 + ramp cfg 7.0`.
+
 `flow_pc3_damped + flow_cosmos` and `flow_cosmos_rf_tail + flow_shift 5.0`
 remain available as explicit alternatives from previous testing.
 
