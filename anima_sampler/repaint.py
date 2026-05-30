@@ -10,6 +10,76 @@ LATENT_FILL_MODES = ["original", "masked black", "neutral gray"]
 CONTROL_FILL_MODES = ["masked black", "neutral gray", "blurred reference"]
 
 
+class AnimaInpaintLatentPrepare:
+    """Prepare an inpaint latent for Anima Flow Corrective Sampler."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "mask": ("MASK",),
+                "vae": ("VAE",),
+                "mask_threshold": (
+                    "FLOAT",
+                    {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
+                "mask_grow": (
+                    "INT",
+                    {"default": 32, "min": 0, "max": 512, "step": 1},
+                ),
+                "mask_feather": (
+                    "INT",
+                    {"default": 16, "min": 0, "max": 512, "step": 1},
+                ),
+                "latent_fill": (LATENT_FILL_MODES, {"default": "masked black"}),
+                "invert_mask": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("LATENT", "MASK", "IMAGE", "STRING")
+    RETURN_NAMES = ("latent", "mask", "mask_preview", "log")
+    FUNCTION = "prepare"
+    CATEGORY = NODE_CATEGORY
+
+    def prepare(
+        self,
+        image,
+        mask,
+        vae,
+        mask_threshold,
+        mask_grow,
+        mask_feather,
+        latent_fill,
+        invert_mask,
+    ):
+        latent, _control_image, processed_mask, mask_preview, prep_log = (
+            AnimaCosmosRepaintPrepare().prepare(
+                image=image,
+                mask=mask,
+                vae=vae,
+                mode="structure repaint",
+                mask_threshold=mask_threshold,
+                mask_grow=mask_grow,
+                mask_feather=mask_feather,
+                latent_fill=latent_fill,
+                control_fill="masked black",
+                invert_mask=invert_mask,
+            )
+        )
+        log = "\n\n".join(
+            [
+                "AnimaInpaintLatentPrepare",
+                "workflow: image+mask -> VAE encode for inpaint -> latent noise_mask",
+                "next_node: connect latent to Anima Flow Corrective Sampler latent_image",
+                "controlnet: disabled",
+                "prepare_log:",
+                prep_log,
+            ]
+        )
+        return latent, processed_mask, mask_preview, log
+
+
 class AnimaCosmosRepaintPrepare:
     """Prepare a Cosmos-style masked repaint latent and optional control image."""
 

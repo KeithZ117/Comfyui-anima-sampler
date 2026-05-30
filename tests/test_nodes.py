@@ -11,7 +11,7 @@ from anima_sampler.nodes import (
     AnimaCosmosRepaintPrepare,
     AnimaFlowCorrectiveSampler,
     AnimaFlowSettings,
-    AnimaFourWayComparison,
+    AnimaInpaintLatentPrepare,
     NODE_CATEGORY,
     NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS,
@@ -30,7 +30,7 @@ class NodeRegistrationTests(unittest.TestCase):
             {
                 "AnimaFlowSettings": AnimaFlowSettings,
                 "AnimaFlowCorrectiveSampler": AnimaFlowCorrectiveSampler,
-                "AnimaFourWayComparison": AnimaFourWayComparison,
+                "AnimaInpaintLatentPrepare": AnimaInpaintLatentPrepare,
                 "AnimaCosmosRepaintPrepare": AnimaCosmosRepaintPrepare,
                 "AnimaCosmosReferenceModelPatch": AnimaCosmosReferenceModelPatch,
                 "AnimaCosmosReferenceLatent": AnimaCosmosReferenceLatent,
@@ -41,7 +41,7 @@ class NodeRegistrationTests(unittest.TestCase):
             {
                 "AnimaFlowSettings": "Anima Flow Settings",
                 "AnimaFlowCorrectiveSampler": "Anima Flow Corrective Sampler",
-                "AnimaFourWayComparison": "Anima Four Way Comparison",
+                "AnimaInpaintLatentPrepare": "Anima Inpaint Latent Prepare",
                 "AnimaCosmosRepaintPrepare": "Anima Cosmos Repaint Prepare",
                 "AnimaCosmosReferenceModelPatch": "Anima Cosmos Reference Model Patch",
                 "AnimaCosmosReferenceLatent": "Anima Cosmos Reference Latent",
@@ -366,94 +366,6 @@ class NodeRegistrationTests(unittest.TestCase):
         self.assertEqual(params["cfg_schedule_mode"], "constant")
         self.assertFalse(params["final_clean_pass"])
 
-    def test_four_way_comparison_node_exposes_expected_interface(self):
-        inputs = AnimaFourWayComparison.INPUT_TYPES()["required"]
-
-        self.assertEqual(inputs["steps"][1]["default"], 35)
-        self.assertEqual(inputs["unipc_cfg"][1]["default"], 7.0)
-        self.assertEqual(inputs["pc3_cfg"][1]["default"], 7.0)
-        self.assertEqual(inputs["er_official_cfg"][1]["default"], 4.5)
-        self.assertEqual(inputs["er_high_cfg"][1]["default"], 7.0)
-        self.assertEqual(
-            AnimaFourWayComparison.RETURN_TYPES,
-            ("IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "STRING"),
-        )
-        self.assertEqual(
-            AnimaFourWayComparison.RETURN_NAMES,
-            (
-                "comparison",
-                "unipc_image",
-                "pc3_image",
-                "er_sde_simple_cfg45_image",
-                "er_sde_simple_cfg7_image",
-                "log",
-            ),
-        )
-
-    def test_four_way_comparison_uses_expected_profiles(self):
-        unipc_latent = {"samples": torch.zeros(1, 16, 8, 8)}
-        pc3_latent = {"samples": torch.ones(1, 16, 8, 8)}
-        er45_latent = {"samples": torch.full((1, 16, 8, 8), 2.0)}
-        er7_latent = {"samples": torch.full((1, 16, 8, 8), 3.0)}
-        comparison = torch.full((1, 16, 16, 3), 0.5)
-        vae = _DummyVAE(latent_dim=3)
-
-        with (
-            patch(
-                "anima_sampler.nodes._run_sampler_with_params",
-                side_effect=[(unipc_latent, "unipc log"), (pc3_latent, "pc3 log")],
-            ) as flow_run,
-            patch(
-                "anima_sampler.nodes.run_comfy_native_sampler",
-                side_effect=[(er45_latent, "er45 log"), (er7_latent, "er7 log")],
-            ) as native_run,
-            patch(
-                "anima_sampler.nodes.build_labeled_comparison_grid",
-                return_value=comparison,
-            ) as grid,
-        ):
-            out = AnimaFourWayComparison().compare(
-                model=object(),
-                positive=[],
-                negative=[],
-                latent_image={"samples": torch.zeros(1, 16, 8, 8)},
-                vae=vae,
-                seed=7,
-                steps=35,
-                unipc_cfg=7.0,
-                pc3_cfg=7.0,
-                er_official_cfg=4.5,
-                er_high_cfg=7.0,
-                denoise=1.0,
-                add_noise=True,
-            )
-
-        unipc_params = flow_run.call_args_list[0].kwargs["params"]
-        pc3_params = flow_run.call_args_list[1].kwargs["params"]
-        self.assertEqual(unipc_params["flow_solver"], "flow_unipc2_x0")
-        self.assertEqual(pc3_params["flow_solver"], "flow_pc3_damped")
-        self.assertEqual(unipc_params["flow_schedule"], "flow_rf_linear_shift")
-        self.assertEqual(pc3_params["flow_schedule"], "flow_rf_linear_shift")
-        self.assertEqual(unipc_params["flow_shift"], 5.0)
-        self.assertEqual(pc3_params["flow_shift"], 5.0)
-        self.assertFalse(unipc_params["final_clean_pass"])
-        self.assertFalse(pc3_params["final_clean_pass"])
-        self.assertEqual(unipc_params["cfg"], 7.0)
-        self.assertEqual(pc3_params["cfg"], 7.0)
-        self.assertEqual(unipc_params["cfg_schedule_mode"], "constant")
-        self.assertEqual(pc3_params["cfg_schedule_mode"], "constant")
-        self.assertEqual(native_run.call_args_list[0].kwargs["sampler_name"], "er_sde")
-        self.assertEqual(native_run.call_args_list[0].kwargs["scheduler"], "simple")
-        self.assertEqual(native_run.call_args_list[0].kwargs["cfg"], 4.5)
-        self.assertEqual(native_run.call_args_list[1].kwargs["cfg"], 7.0)
-        self.assertEqual(len(grid.call_args.args[0]), 4)
-        self.assertIn("UniPC + linear shift5", grid.call_args.args[1][0])
-        self.assertIn("PC3 + linear shift5", grid.call_args.args[1][1])
-        self.assertIn("er_sde + simple cfg 4.50", grid.call_args.args[1][2])
-        self.assertIs(out[0], comparison)
-        self.assertIn("AnimaFourWayComparison", out[5])
-        self.assertIn("profile_b: flow_pc3_damped", out[5])
-
     def test_repaint_prepare_outputs_latent_noise_mask_and_control_image(self):
         image = torch.ones(1, 8, 8, 3)
         mask = torch.zeros(1, 8, 8)
@@ -481,6 +393,49 @@ class NodeRegistrationTests(unittest.TestCase):
         self.assertLess(float(control[:, 3:5, 3:5].max()), 1.0)
         self.assertIn("recommended_denoise: 0.52", log)
         self.assertIn("noise_mask_shape: [1, 1, 2, 2]", log)
+
+    def test_inpaint_latent_prepare_exposes_image_mask_workflow(self):
+        inputs = AnimaInpaintLatentPrepare.INPUT_TYPES()["required"]
+
+        self.assertIn("image", inputs)
+        self.assertIn("mask", inputs)
+        self.assertIn("vae", inputs)
+        self.assertNotIn("model", inputs)
+        self.assertNotIn("positive", inputs)
+        self.assertNotIn("negative", inputs)
+        self.assertEqual(
+            AnimaInpaintLatentPrepare.RETURN_TYPES,
+            ("LATENT", "MASK", "IMAGE", "STRING"),
+        )
+
+    def test_inpaint_latent_prepare_outputs_sampler_ready_latent(self):
+        image = torch.ones(1, 8, 8, 3)
+        mask = torch.zeros(1, 8, 8)
+        mask[:, 2:6, 2:6] = 1.0
+        samples = torch.zeros(1, 16, 2, 2)
+        vae = _DummyEncodeVAE(samples=samples)
+
+        latent, out_mask, preview, log = (
+            AnimaInpaintLatentPrepare().prepare(
+                image=image,
+                mask=mask,
+                vae=vae,
+                mask_threshold=0.5,
+                mask_grow=0,
+                mask_feather=0,
+                latent_fill="masked black",
+                invert_mask=False,
+            )
+        )
+
+        self.assertIs(latent["samples"], samples)
+        self.assertIn("noise_mask", latent)
+        self.assertEqual(tuple(latent["noise_mask"].shape), (1, 1, 2, 2))
+        self.assertEqual(tuple(out_mask.shape), (1, 8, 8))
+        self.assertEqual(tuple(preview.shape), (1, 8, 8, 3))
+        self.assertLess(float(vae.encoded_image[:, 2:6, 2:6].max()), 1.0)
+        self.assertIn("next_node: connect latent to Anima Flow Corrective Sampler", log)
+        self.assertIn("controlnet: disabled", log)
 
     def test_repaint_prepare_can_invert_mask_and_fill_latent(self):
         image = torch.ones(1, 4, 4, 3)

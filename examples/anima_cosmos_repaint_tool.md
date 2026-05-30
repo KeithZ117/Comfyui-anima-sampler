@@ -4,6 +4,47 @@ This branch adds a first-pass repaint toolkit for Anima/Cosmos-style image edits
 
 ## Nodes
 
+### Anima Inpaint Latent Prepare
+
+Use this first when you want normal ComfyUI masked repaint without ControlNet.
+It is a front-end node for `Anima Flow Corrective Sampler`.
+
+Typical workflow:
+
+```text
+Load Image image
+Load Image mask
+VAE
+-> Anima Inpaint Latent Prepare
+-> latent -> Anima Flow Corrective Sampler latent_image
+-> Save Image from sampler image output
+```
+
+The node only prepares the inpaint latent:
+
+```text
+image + mask
+-> VAE encode
+-> attach latent noise_mask
+```
+
+White mask pixels are repainted. Black mask pixels are kept.
+
+Starting settings:
+
+```text
+steps: 18
+cfg: 4.5
+denoise: 0.45
+flow_solver: flow_unipc2_x0
+mask_grow: 32
+mask_feather: 16
+latent_fill: masked black
+```
+
+For light edge cleanup, reduce `denoise` to `0.25-0.35`. For structural
+redraws such as hands, use `0.45-0.60` and mask the whole local structure.
+
 ### Anima Cosmos Repaint Prepare
 
 Inputs:

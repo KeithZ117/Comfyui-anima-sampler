@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import math
 
-from .experiment import build_labeled_comparison_grid
 from .comfy_runner import (
     run_comfy_anima_sampler,
-    run_comfy_native_sampler,
 )
 from .flow_constants import (
     CFG_SCHEDULE_MODES,
@@ -16,7 +14,7 @@ from .flow_constants import (
 )
 from .node_constants import NODE_CATEGORY
 from .reference import AnimaCosmosReferenceLatent, AnimaCosmosReferenceModelPatch
-from .repaint import AnimaCosmosRepaintPrepare
+from .repaint import AnimaCosmosRepaintPrepare, AnimaInpaintLatentPrepare
 
 ANIMA_FLOW_SETTINGS = "ANIMA_FLOW_SETTINGS"
 DEFAULT_FLOW_SCHEDULE = "flow_rf_linear_shift"
@@ -482,225 +480,6 @@ class AnimaFlowCorrectiveSampler:
         return latent_out, image, log
 
 
-class AnimaFourWayComparison:
-    """Generate a fixed four-way comparison grid for final sampler checks."""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "model": ("MODEL",),
-                "positive": ("CONDITIONING",),
-                "negative": ("CONDITIONING",),
-                "latent_image": ("LATENT",),
-                "vae": ("VAE",),
-                "seed": (
-                    "INT",
-                    {
-                        "default": 1,
-                        "min": 0,
-                        "max": 0xFFFFFFFFFFFFFFFF,
-                    },
-                ),
-                "steps": (
-                    "INT",
-                    {
-                        "default": ANIMA_FLOW_BASELINE["steps"],
-                        "min": 1,
-                        "max": 1000,
-                    },
-                ),
-                "unipc_cfg": (
-                    "FLOAT",
-                    {
-                        "default": 7.0,
-                        "min": 0.0,
-                        "max": 30.0,
-                        "step": 0.1,
-                    },
-                ),
-                "pc3_cfg": (
-                    "FLOAT",
-                    {
-                        "default": 7.0,
-                        "min": 0.0,
-                        "max": 30.0,
-                        "step": 0.1,
-                    },
-                ),
-                "er_official_cfg": (
-                    "FLOAT",
-                    {
-                        "default": 4.5,
-                        "min": 0.0,
-                        "max": 30.0,
-                        "step": 0.1,
-                    },
-                ),
-                "er_high_cfg": (
-                    "FLOAT",
-                    {
-                        "default": 7.0,
-                        "min": 0.0,
-                        "max": 30.0,
-                        "step": 0.1,
-                    },
-                ),
-                "denoise": (
-                    "FLOAT",
-                    {
-                        "default": 1.0,
-                        "min": 0.01,
-                        "max": 1.0,
-                        "step": 0.01,
-                    },
-                ),
-                "add_noise": ("BOOLEAN", {"default": True}),
-            }
-        }
-
-    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "STRING")
-    RETURN_NAMES = (
-        "comparison",
-        "unipc_image",
-        "pc3_image",
-        "er_sde_simple_cfg45_image",
-        "er_sde_simple_cfg7_image",
-        "log",
-    )
-    FUNCTION = "compare"
-    CATEGORY = NODE_CATEGORY
-
-    def compare(
-        self,
-        model,
-        positive,
-        negative,
-        latent_image,
-        vae,
-        seed,
-        steps,
-        unipc_cfg,
-        pc3_cfg,
-        er_official_cfg,
-        er_high_cfg,
-        denoise,
-        add_noise,
-    ):
-        unipc_params = _constant_linear_shift_profile(
-            seed=seed,
-            steps=steps,
-            cfg=unipc_cfg,
-            flow_solver="flow_unipc2_x0",
-        )
-        pc3_params = _constant_linear_shift_profile(
-            seed=seed,
-            steps=steps,
-            cfg=pc3_cfg,
-            flow_solver="flow_pc3_damped",
-        )
-
-        unipc_latent, unipc_log = _run_sampler_with_params(
-            model=model,
-            positive=positive,
-            negative=negative,
-            latent_image=latent_image,
-            params=unipc_params,
-            denoise=denoise,
-            add_noise=add_noise,
-            disable_pbar=False,
-        )
-        pc3_latent, pc3_log = _run_sampler_with_params(
-            model=model,
-            positive=positive,
-            negative=negative,
-            latent_image=latent_image,
-            params=pc3_params,
-            denoise=denoise,
-            add_noise=add_noise,
-            disable_pbar=False,
-        )
-        er_official_latent, er_official_log = run_comfy_native_sampler(
-            model=model,
-            positive=positive,
-            negative=negative,
-            latent=latent_image,
-            seed=int(seed),
-            steps=int(steps),
-            cfg=float(er_official_cfg),
-            denoise=float(denoise),
-            sampler_name="er_sde",
-            scheduler="simple",
-            add_noise=bool(add_noise),
-            disable_pbar=False,
-        )
-        er_high_latent, er_high_log = run_comfy_native_sampler(
-            model=model,
-            positive=positive,
-            negative=negative,
-            latent=latent_image,
-            seed=int(seed),
-            steps=int(steps),
-            cfg=float(er_high_cfg),
-            denoise=float(denoise),
-            sampler_name="er_sde",
-            scheduler="simple",
-            add_noise=bool(add_noise),
-            disable_pbar=False,
-        )
-
-        unipc_image = _decode_latent_image(vae, unipc_latent)
-        pc3_image = _decode_latent_image(vae, pc3_latent)
-        er_official_image = _decode_latent_image(vae, er_official_latent)
-        er_high_image = _decode_latent_image(vae, er_high_latent)
-        comparison = build_labeled_comparison_grid(
-            [unipc_image, pc3_image, er_official_image, er_high_image],
-            [
-                f"UniPC + linear shift5 + const cfg {float(unipc_cfg):.2f}",
-                f"PC3 + linear shift5 + const cfg {float(pc3_cfg):.2f}",
-                f"er_sde + simple cfg {float(er_official_cfg):.2f}",
-                f"er_sde + simple cfg {float(er_high_cfg):.2f}",
-            ],
-            columns=2,
-            label_height=64,
-            gap=8,
-        )
-
-        log = "\n\n".join(
-            [
-                "AnimaFourWayComparison",
-                "profile_a: flow_unipc2_x0 + flow_rf_linear_shift + flow_shift=5.0 + const cfg",
-                "profile_b: flow_pc3_damped + flow_rf_linear_shift + flow_shift=5.0 + const cfg",
-                "profile_c: er_sde + simple",
-                "profile_d: er_sde + simple",
-                f"seed: {int(seed)}",
-                f"steps: {int(steps)}",
-                f"unipc_cfg: {float(unipc_cfg):.4f}",
-                f"pc3_cfg: {float(pc3_cfg):.4f}",
-                f"er_official_cfg: {float(er_official_cfg):.4f}",
-                f"er_high_cfg: {float(er_high_cfg):.4f}",
-                f"denoise: {float(denoise):.4f}",
-                f"add_noise: {bool(add_noise)}",
-                "unipc_log:",
-                unipc_log,
-                "pc3_log:",
-                pc3_log,
-                "er_sde_simple_cfg45_log:",
-                er_official_log,
-                "er_sde_simple_cfg7_log:",
-                er_high_log,
-            ]
-        )
-        return (
-            comparison,
-            unipc_image,
-            pc3_image,
-            er_official_image,
-            er_high_image,
-            log,
-        )
-
-
 def _apply_disconnected_sampler_defaults(params: dict, flow_settings) -> dict:
     out = dict(params)
     if flow_settings is None:
@@ -794,7 +573,7 @@ def _run_sampler_with_params(
 NODE_CLASS_MAPPINGS = {
     "AnimaFlowSettings": AnimaFlowSettings,
     "AnimaFlowCorrectiveSampler": AnimaFlowCorrectiveSampler,
-    "AnimaFourWayComparison": AnimaFourWayComparison,
+    "AnimaInpaintLatentPrepare": AnimaInpaintLatentPrepare,
     "AnimaCosmosRepaintPrepare": AnimaCosmosRepaintPrepare,
     "AnimaCosmosReferenceModelPatch": AnimaCosmosReferenceModelPatch,
     "AnimaCosmosReferenceLatent": AnimaCosmosReferenceLatent,
@@ -803,7 +582,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AnimaFlowSettings": "Anima Flow Settings",
     "AnimaFlowCorrectiveSampler": "Anima Flow Corrective Sampler",
-    "AnimaFourWayComparison": "Anima Four Way Comparison",
+    "AnimaInpaintLatentPrepare": "Anima Inpaint Latent Prepare",
     "AnimaCosmosRepaintPrepare": "Anima Cosmos Repaint Prepare",
     "AnimaCosmosReferenceModelPatch": "Anima Cosmos Reference Model Patch",
     "AnimaCosmosReferenceLatent": "Anima Cosmos Reference Latent",
