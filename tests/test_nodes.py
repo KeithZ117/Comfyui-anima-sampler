@@ -823,6 +823,75 @@ class NodeRegistrationTests(unittest.TestCase):
 
         self.assertEqual(patched.model.last_input_shape, (1, 16, 2, 2, 2))
 
+    def test_reference_patch_does_not_rewrap_wrapper_chain_that_preserves_reference(self):
+        model = _DummyModelPatcher()
+        ref_a = torch.full((1, 16, 1, 2, 2), 2.0)
+        ref_b = torch.full((1, 16, 1, 2, 2), 3.0)
+        patched, = AnimaCosmosReferenceLatent().apply(model, {"samples": ref_a}, True)
+        previous_wrapper = patched.model_options["model_function_wrapper"]
+
+        def external_wrapper(model_apply, model_kwargs):
+            return previous_wrapper(model_apply, model_kwargs)
+
+        patched.model_options["model_function_wrapper"] = external_wrapper
+        patched, = AnimaCosmosReferenceLatent().apply(patched, {"samples": ref_b}, True)
+        x = torch.ones(1, 16, 1, 2, 2)
+
+        patched.model_options["model_function_wrapper"](
+            patched.model.apply_model,
+            {"input": x, "timestep": torch.ones(1), "c": {}},
+        )
+
+        self.assertIs(patched.model_options["model_function_wrapper"], external_wrapper)
+        self.assertEqual(patched.model.last_input_shape, (1, 16, 3, 2, 2))
+
+    def test_reference_patch_rewraps_when_installed_flag_is_stale(self):
+        model = _DummyModelPatcher()
+        ref_a = torch.full((1, 16, 1, 2, 2), 2.0)
+        ref_b = torch.full((1, 16, 1, 2, 2), 3.0)
+        patched, = AnimaCosmosReferenceLatent().apply(model, {"samples": ref_a}, True)
+
+        def replacement_wrapper(model_apply, model_kwargs):
+            kwargs = dict(model_kwargs)
+            x = kwargs.pop("input")
+            timestep = kwargs.pop("timestep")
+            cond = kwargs.pop("c", {}) or {}
+            return model_apply(x, timestep, **cond, **kwargs)
+
+        patched.model_options["model_function_wrapper"] = replacement_wrapper
+        patched, = AnimaCosmosReferenceLatent().apply(patched, {"samples": ref_b}, True)
+        x = torch.ones(1, 16, 1, 2, 2)
+
+        patched.model_options["model_function_wrapper"](
+            patched.model.apply_model,
+            {"input": x, "timestep": torch.ones(1), "c": {}},
+        )
+
+        self.assertIsNot(patched.model_options["model_function_wrapper"], replacement_wrapper)
+        self.assertEqual(patched.model.last_input_shape, (1, 16, 3, 2, 2))
+
+    def test_reference_patch_detects_previous_wrapper_in_default_argument(self):
+        model = _DummyModelPatcher()
+        ref_a = torch.full((1, 16, 1, 2, 2), 2.0)
+        ref_b = torch.full((1, 16, 1, 2, 2), 3.0)
+        patched, = AnimaCosmosReferenceLatent().apply(model, {"samples": ref_a}, True)
+        previous_wrapper = patched.model_options["model_function_wrapper"]
+
+        def external_wrapper(model_apply, model_kwargs, previous=previous_wrapper):
+            return previous(model_apply, model_kwargs)
+
+        patched.model_options["model_function_wrapper"] = external_wrapper
+        patched, = AnimaCosmosReferenceLatent().apply(patched, {"samples": ref_b}, True)
+        x = torch.ones(1, 16, 1, 2, 2)
+
+        patched.model_options["model_function_wrapper"](
+            patched.model.apply_model,
+            {"input": x, "timestep": torch.ones(1), "c": {}},
+        )
+
+        self.assertIs(patched.model_options["model_function_wrapper"], external_wrapper)
+        self.assertEqual(patched.model.last_input_shape, (1, 16, 3, 2, 2))
+
 
 class _DummyVAE:
     def __init__(self, latent_dim=2, image=None):

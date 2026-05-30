@@ -7,6 +7,10 @@ import types
 from .node_constants import NODE_CATEGORY
 
 
+_PATCH_INSTALLED_KEY = "anima_cosmos_reference_patch_installed"
+_EXTRA_CONDS_INSTALLED_KEY = "anima_cosmos_reference_extra_conds_installed"
+
+
 class AnimaCosmosReferenceModelPatch:
     """Patch a Cosmos/Anima model so reference latents can be appended in time."""
 
@@ -69,11 +73,13 @@ def _patch_cosmos_reference_model(model):
     if model_options is None:
         patched.model_options = {}
         model_options = patched.model_options
-    if model_options.get("anima_cosmos_reference_patch_installed"):
-        return patched
 
     model_obj = getattr(patched, "model", None)
-    if model_obj is not None and hasattr(model_obj, "extra_conds"):
+    if (
+        model_obj is not None
+        and hasattr(model_obj, "extra_conds")
+        and not model_options.get(_EXTRA_CONDS_INSTALLED_KEY)
+    ):
         original_extra_conds = model_obj.extra_conds
 
         def custom_extra_conds(self, **kwargs):
@@ -85,8 +91,12 @@ def _patch_cosmos_reference_model(model):
             return out
 
         patched.add_object_patch("extra_conds", types.MethodType(custom_extra_conds, model_obj))
+        model_options[_EXTRA_CONDS_INSTALLED_KEY] = True
 
     previous_wrapper = model_options.get("model_function_wrapper")
+    if _wrapper_contains_reference(previous_wrapper):
+        model_options[_PATCH_INSTALLED_KEY] = True
+        return patched
 
     def reference_wrapper(model_apply, model_kwargs):
         refs = _collect_reference_latents(model_apply, model_kwargs)
@@ -106,8 +116,49 @@ def _patch_cosmos_reference_model(model):
         return out
 
     patched.set_model_unet_function_wrapper(reference_wrapper)
-    model_options["anima_cosmos_reference_patch_installed"] = True
+    _mark_reference_wrapper(reference_wrapper, previous_wrapper)
+    model_options[_PATCH_INSTALLED_KEY] = True
     return patched
+
+
+def _mark_reference_wrapper(wrapper, previous_wrapper):
+    setattr(wrapper, "_anima_cosmos_reference_wrapper", True)
+    setattr(wrapper, "_anima_previous_wrapper", previous_wrapper)
+
+
+def _wrapper_contains_reference(wrapper, seen=None):
+    if wrapper is None:
+        return False
+    if bool(getattr(wrapper, "_anima_cosmos_reference_wrapper", False)):
+        return True
+
+    if seen is None:
+        seen = set()
+    wrapper_id = id(wrapper)
+    if wrapper_id in seen:
+        return False
+    seen.add(wrapper_id)
+
+    previous = getattr(wrapper, "_anima_previous_wrapper", None)
+    if callable(previous) and _wrapper_contains_reference(previous, seen):
+        return True
+
+    for value in getattr(wrapper, "__defaults__", None) or ():
+        if callable(value) and _wrapper_contains_reference(value, seen):
+            return True
+    for value in (getattr(wrapper, "__kwdefaults__", None) or {}).values():
+        if callable(value) and _wrapper_contains_reference(value, seen):
+            return True
+
+    closure = getattr(wrapper, "__closure__", None) or ()
+    for cell in closure:
+        try:
+            value = cell.cell_contents
+        except ValueError:
+            continue
+        if callable(value) and _wrapper_contains_reference(value, seen):
+            return True
+    return False
 
 
 def _collect_reference_latents(model_apply, model_kwargs):
