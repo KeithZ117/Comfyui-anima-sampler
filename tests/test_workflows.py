@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EDIT_ROUTE_WORKFLOW = ROOT / "example_workflows" / "anima_t_reference_edit_route.json"
+NATIVE_REPAINT_WORKFLOW = ROOT / "example_workflows" / "anima_t_reference_native_repaint_route.json"
 
 
 class WorkflowTemplateTests(unittest.TestCase):
@@ -37,11 +38,14 @@ class WorkflowTemplateTests(unittest.TestCase):
 
     def test_edit_route_workflow_is_in_comfyui_template_folder(self):
         self.assertTrue(EDIT_ROUTE_WORKFLOW.exists())
+        self.assertTrue(NATIVE_REPAINT_WORKFLOW.exists())
         self.assertEqual(EDIT_ROUTE_WORKFLOW.parent.name, "example_workflows")
+        self.assertEqual(NATIVE_REPAINT_WORKFLOW.parent.name, "example_workflows")
 
         comfyui_pattern = str(ROOT.parent / "*/example_workflows/*.json")
         matches = {Path(path).resolve() for path in glob.glob(comfyui_pattern)}
         self.assertIn(EDIT_ROUTE_WORKFLOW.resolve(), matches)
+        self.assertIn(NATIVE_REPAINT_WORKFLOW.resolve(), matches)
 
     def test_edit_route_workflow_contains_required_nodes(self):
         self.assertEqual(
@@ -117,6 +121,94 @@ class WorkflowTemplateTests(unittest.TestCase):
             sampler["widgets_values"],
             [183041756463762, "fixed", 22, 3.4, "er_sde", "simple", 1.0],
         )
+
+    def test_native_repaint_workflow_uses_route_ksampler_and_composite(self):
+        workflow, nodes, nodes_by_type, links = _load_workflow(NATIVE_REPAINT_WORKFLOW)
+        self.assertEqual(workflow["id"], "anima-t-reference-native-repaint-route")
+        self.assertEqual(
+            set(nodes_by_type),
+            {
+                "UNETLoader",
+                "LoraLoaderModelOnly",
+                "LoadImage",
+                "VAELoader",
+                "AnimaTReferenceRepaintRoute",
+                "CLIPLoader",
+                "CLIPTextEncode",
+                "KSampler",
+                "VAEDecode",
+                "AnimaRepaintComposite",
+                "SaveImage",
+            },
+        )
+
+        route = nodes_by_type["AnimaTReferenceRepaintRoute"]
+        sampler = nodes_by_type["KSampler"]
+        decode = nodes_by_type["VAEDecode"]
+        composite = nodes_by_type["AnimaRepaintComposite"]
+        save = nodes_by_type["SaveImage"]
+
+        source, link = _source_node(nodes, links, route, "mask")
+        self.assertEqual(source["type"], "LoadImage")
+        self.assertEqual(link[5], "MASK")
+
+        source, link = _source_node(nodes, links, sampler, "model")
+        self.assertEqual(source["type"], "AnimaTReferenceRepaintRoute")
+        self.assertEqual(link[2], 0)
+        self.assertEqual(link[5], "MODEL")
+
+        source, link = _source_node(nodes, links, sampler, "latent_image")
+        self.assertEqual(source["type"], "AnimaTReferenceRepaintRoute")
+        self.assertEqual(link[2], 1)
+        self.assertEqual(link[5], "LATENT")
+
+        source, link = _source_node(nodes, links, composite, "source_image")
+        self.assertEqual(source["type"], "LoadImage")
+        self.assertEqual(link[5], "IMAGE")
+
+        source, link = _source_node(nodes, links, composite, "repaint_image")
+        self.assertEqual(source["type"], "VAEDecode")
+        self.assertEqual(link[5], "IMAGE")
+
+        source, link = _source_node(nodes, links, composite, "mask")
+        self.assertEqual(source["type"], "AnimaTReferenceRepaintRoute")
+        self.assertEqual(link[2], 2)
+        self.assertEqual(link[5], "MASK")
+
+        source, link = _source_node(nodes, links, save, "images")
+        self.assertEqual(source["type"], "AnimaRepaintComposite")
+        self.assertEqual(link[5], "IMAGE")
+
+        self.assertEqual(
+            route["widgets_values"],
+            ["structure repaint", 0.5, 32, 48, "neutral gray", "neutral gray", 1, False],
+        )
+        self.assertEqual(
+            sampler["widgets_values"],
+            [183041756463762, "fixed", 22, 3.4, "er_sde", "simple", 1.0],
+        )
+        self.assertEqual(composite["widgets_values"], [0.5, 0, 32, False])
+        self.assertEqual(decode["type"], "VAEDecode")
+
+
+def _load_workflow(path):
+    with path.open("r", encoding="utf-8") as handle:
+        workflow = json.load(handle)
+    nodes = {node["id"]: node for node in workflow["nodes"]}
+    nodes_by_type = {node["type"]: node for node in workflow["nodes"]}
+    links = {link[0]: link for link in workflow["links"]}
+    return workflow, nodes, nodes_by_type, links
+
+
+def _source_node(nodes, links, node, input_name):
+    for item in node.get("inputs", []):
+        if item["name"] == input_name:
+            link_id = item.get("link")
+            if link_id is None:
+                raise AssertionError(f"{node['type']}.{input_name} is not linked")
+            link = links[link_id]
+            return nodes[link[1]], link
+    raise AssertionError(f"Missing workflow input: {node['type']}.{input_name}")
 
 
 if __name__ == "__main__":

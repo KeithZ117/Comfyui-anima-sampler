@@ -62,7 +62,7 @@ Anima T-Reference Repaint Route.model
 -> Anima Flow Corrective Sampler.model
 
 Anima T-Reference Repaint Route.latent
--> Anima Flow Corrective Sampler.latent_image
+-> native KSampler.latent_image or Anima Flow Corrective Sampler.latent_image
 ```
 
 Starting settings:
@@ -79,6 +79,10 @@ cfg: 3.5-5.0
 
 This is the route inspired by the discussion workflow that uses the model/UNet
 forward path directly instead of training an inpaint ControlNet.
+
+If you use native KSampler + VAEDecode, feed the decoded image, original source
+image, and route `mask` output into `Anima Repaint Composite`. This keeps the
+unmasked area from being softened by a full-image VAE roundtrip.
 
 ### Route B: Anima T-Reference Control Repaint Route
 
@@ -111,6 +115,18 @@ Anima Cosmos Reference Latent.model
 
 Route.latent
 -> Anima Flow Corrective Sampler.latent_image
+```
+
+For native KSampler, replace the final sampler with:
+
+```text
+Route.model + Route.latent
+-> native KSampler er_sde/simple
+-> VAEDecode
+-> Anima Repaint Composite.repaint_image
+
+Load Image.image -> Anima Repaint Composite.source_image
+Route.mask       -> Anima Repaint Composite.mask
 ```
 
 Workflow for a conditioning-only ControlNet:
@@ -206,6 +222,21 @@ Outputs:
 - `mask`: hard grown mask for ControlNet/LLLite mask inputs.
 - `mask_preview`: red overlay preview.
 - `log`: recommended sampler settings for the selected mode.
+
+### Anima Repaint Composite
+
+Use this after native KSampler + VAEDecode repaint routes. Native VAE decode
+returns a full decoded image, so even unchanged areas can look softer than the
+source. This node composites only the masked region over the original image.
+
+Inputs:
+
+- `source_image`: original image.
+- `repaint_image`: image decoded from the sampler output.
+- `mask`: hard processed mask from an Anima repaint route, or the original mask.
+- `mask_grow`: leave at `0` when using a route output mask, since it is already
+  grown.
+- `mask_feather`: softens only the final composite edge.
 
 Recommended starting settings:
 

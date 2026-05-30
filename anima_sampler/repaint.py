@@ -200,6 +200,77 @@ class AnimaCosmosRepaintPrepare:
         return latent, control_image, sample_mask, mask_preview, log
 
 
+class AnimaRepaintComposite:
+    """Composite a native KSampler repaint over the original source image."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "source_image": ("IMAGE",),
+                "repaint_image": ("IMAGE",),
+                "mask": ("MASK",),
+                "mask_threshold": (
+                    "FLOAT",
+                    {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
+                "mask_grow": (
+                    "INT",
+                    {"default": 0, "min": 0, "max": 512, "step": 1},
+                ),
+                "mask_feather": (
+                    "INT",
+                    {"default": 32, "min": 0, "max": 512, "step": 1},
+                ),
+                "invert_mask": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
+    RETURN_NAMES = ("image", "composite_mask", "log")
+    FUNCTION = "composite"
+    CATEGORY = NODE_CATEGORY
+
+    def composite(
+        self,
+        source_image,
+        repaint_image,
+        mask,
+        mask_threshold,
+        mask_grow,
+        mask_feather,
+        invert_mask,
+    ):
+        source = _normalize_image_tensor(source_image)
+        repaint = _normalize_image_tensor(repaint_image)
+        repaint = _match_image_to_source(repaint, source)
+        hard_mask = _normalize_mask_tensor(
+            mask,
+            source,
+            threshold=mask_threshold,
+            invert=invert_mask,
+        )
+        hard_mask = _grow_mask(hard_mask, int(mask_grow)).clamp(0.0, 1.0)
+        composite_mask = _feather_mask(hard_mask, int(mask_feather))
+        mask4 = composite_mask.unsqueeze(-1).to(device=source.device, dtype=source.dtype)
+        image = (source * (1.0 - mask4) + repaint * mask4).clamp(0.0, 1.0)
+        log = "\n".join(
+            [
+                "AnimaRepaintComposite",
+                "workflow: native KSampler/VAEDecode repaint -> composite over source image",
+                f"mask_threshold: {float(mask_threshold):.3f}",
+                f"mask_grow: {int(mask_grow)}",
+                f"mask_feather: {int(mask_feather)}",
+                f"invert_mask: {bool(invert_mask)}",
+                f"source_shape: {_shape_text(source)}",
+                f"repaint_shape: {_shape_text(repaint)}",
+                f"composite_mask_shape: {_shape_text(composite_mask)}",
+                "input_mask: use the hard mask from Anima repaint routes; leave mask_grow at 0 for that path",
+            ]
+        )
+        return image, composite_mask, log
+
+
 def _encode_latent_image(vae, image):
     if vae is None or not hasattr(vae, "encode"):
         raise ValueError("vae must provide an encode(image) method")
@@ -379,6 +450,27 @@ def _build_mask_preview(image, mask):
     overlay[..., 0] = 1.0
     alpha = (mask.unsqueeze(-1) * 0.55).to(dtype=image.dtype, device=image.device)
     return (image * (1.0 - alpha) + overlay * alpha).clamp(0.0, 1.0)
+
+
+def _match_image_to_source(image, source):
+    if int(image.shape[-1]) > int(source.shape[-1]):
+        image = image[..., : int(source.shape[-1])]
+    elif int(image.shape[-1]) < int(source.shape[-1]):
+        raise ValueError("repaint_image must have at least as many channels as source_image")
+    if int(image.shape[0]) == 1 and int(source.shape[0]) > 1:
+        image = image.repeat(int(source.shape[0]), 1, 1, 1)
+    if int(image.shape[0]) != int(source.shape[0]):
+        raise ValueError("repaint_image batch must match source_image batch or be a single image")
+    if int(image.shape[1]) == int(source.shape[1]) and int(image.shape[2]) == int(source.shape[2]):
+        return image
+
+    _, F = _torch_modules()
+    return F.interpolate(
+        image.movedim(-1, 1),
+        size=(int(source.shape[1]), int(source.shape[2])),
+        mode="bilinear",
+        align_corners=False,
+    ).movedim(1, -1).clamp(0.0, 1.0)
 
 
 def _repaint_profile(mode: str) -> dict:

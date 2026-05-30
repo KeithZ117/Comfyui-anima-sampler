@@ -14,7 +14,7 @@ from .flow_constants import (
 )
 from .node_constants import NODE_CATEGORY
 from .reference import AnimaCosmosReferenceLatent, AnimaCosmosReferenceModelPatch
-from .repaint import AnimaCosmosRepaintPrepare, AnimaInpaintLatentPrepare
+from .repaint import AnimaCosmosRepaintPrepare, AnimaInpaintLatentPrepare, AnimaRepaintComposite
 from .repaint_routes import (
     AnimaTReferenceControlRepaintRoute,
     AnimaTReferenceEditRoute,
@@ -585,6 +585,7 @@ NODE_CLASS_MAPPINGS = {
     "AnimaTReferenceRepaintRoute": AnimaTReferenceRepaintRoute,
     "AnimaTReferenceControlRepaintRoute": AnimaTReferenceControlRepaintRoute,
     "AnimaCosmosRepaintPrepare": AnimaCosmosRepaintPrepare,
+    "AnimaRepaintComposite": AnimaRepaintComposite,
     "AnimaCosmosReferenceModelPatch": AnimaCosmosReferenceModelPatch,
     "AnimaCosmosReferenceLatent": AnimaCosmosReferenceLatent,
 }
@@ -597,6 +598,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnimaTReferenceRepaintRoute": "Anima T-Reference Repaint Route",
     "AnimaTReferenceControlRepaintRoute": "Anima T-Reference Control Repaint Route",
     "AnimaCosmosRepaintPrepare": "Anima Cosmos Repaint Prepare",
+    "AnimaRepaintComposite": "Anima Repaint Composite",
     "AnimaCosmosReferenceModelPatch": "Anima Cosmos Reference Model Patch",
     "AnimaCosmosReferenceLatent": "Anima Cosmos Reference Latent",
 }

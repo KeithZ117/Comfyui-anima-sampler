@@ -14,6 +14,7 @@ from anima_sampler.nodes import (
     AnimaFlowCorrectiveSampler,
     AnimaFlowSettings,
     AnimaInpaintLatentPrepare,
+    AnimaRepaintComposite,
     AnimaTReferenceControlRepaintRoute,
     AnimaTReferenceEditRoute,
     AnimaTReferenceRepaintRoute,
@@ -40,6 +41,7 @@ class NodeRegistrationTests(unittest.TestCase):
                 "AnimaTReferenceRepaintRoute": AnimaTReferenceRepaintRoute,
                 "AnimaTReferenceControlRepaintRoute": AnimaTReferenceControlRepaintRoute,
                 "AnimaCosmosRepaintPrepare": AnimaCosmosRepaintPrepare,
+                "AnimaRepaintComposite": AnimaRepaintComposite,
                 "AnimaCosmosReferenceModelPatch": AnimaCosmosReferenceModelPatch,
                 "AnimaCosmosReferenceLatent": AnimaCosmosReferenceLatent,
             },
@@ -54,6 +56,7 @@ class NodeRegistrationTests(unittest.TestCase):
                 "AnimaTReferenceRepaintRoute": "Anima T-Reference Repaint Route",
                 "AnimaTReferenceControlRepaintRoute": "Anima T-Reference Control Repaint Route",
                 "AnimaCosmosRepaintPrepare": "Anima Cosmos Repaint Prepare",
+                "AnimaRepaintComposite": "Anima Repaint Composite",
                 "AnimaCosmosReferenceModelPatch": "Anima Cosmos Reference Model Patch",
                 "AnimaCosmosReferenceLatent": "Anima Cosmos Reference Latent",
             },
@@ -603,6 +606,30 @@ class NodeRegistrationTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(float(vae.encoded_image[:, 1:3, 1:3].mean()), 0.5)
+
+    def test_repaint_composite_softens_native_sampler_output_edge(self):
+        source = torch.ones(1, 7, 7, 3)
+        repaint = torch.zeros(1, 7, 7, 3)
+        mask = torch.zeros(1, 7, 7)
+        mask[:, 3, 3] = 1.0
+
+        image, composite_mask, log = AnimaRepaintComposite().composite(
+            source_image=source,
+            repaint_image=repaint,
+            mask=mask,
+            mask_threshold=0.5,
+            mask_grow=0,
+            mask_feather=2,
+            invert_mask=False,
+        )
+
+        self.assertEqual(tuple(image.shape), (1, 7, 7, 3))
+        self.assertEqual(tuple(composite_mask.shape), (1, 7, 7))
+        self.assertEqual(float(image[0, 3, 3, 0]), 0.0)
+        self.assertGreater(float(image[0, 3, 4, 0]), 0.0)
+        self.assertLess(float(image[0, 3, 4, 0]), 1.0)
+        self.assertEqual(float(image[0, 0, 0, 0]), 1.0)
+        self.assertIn("native KSampler/VAEDecode repaint", log)
 
     def test_t_reference_repaint_route_builds_patched_model_and_latent(self):
         image = torch.full((1, 8, 8, 3), 0.25)

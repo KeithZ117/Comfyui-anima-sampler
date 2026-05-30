@@ -66,6 +66,9 @@ in ComfyUI to inspect the example workflow.
   inpaint noise mask and a filled time-axis reference for local repaint tests.
 - `Anima T-Reference Control Repaint Route`: prepares the same masked assets for
   external LLLite/ControlNet inpaint nodes.
+- `Anima Repaint Composite`: composites a native KSampler/VAEDecode repaint
+  back over the original image so unmasked pixels do not get softened by a full
+  VAE roundtrip.
 - `Anima Four Way Comparison`: fixed four-way image grid for UniPC linear
   shift cfg7, PC3 linear shift cfg7, `er_sde + simple` cfg4.5, and
   `er_sde + simple` cfg7.
@@ -89,6 +92,8 @@ native KSampler. The discussion workflow that motivated this path uses
 The importable template is
 [`example_workflows/anima_t_reference_edit_route.json`](example_workflows/anima_t_reference_edit_route.json),
 which ComfyUI exposes from the custom node template browser after install.
+For masked native-KSampler repainting, use
+[`example_workflows/anima_t_reference_native_repaint_route.json`](example_workflows/anima_t_reference_native_repaint_route.json).
 
 For masked repainting, use `neutral gray` latent/reference fill as the starting
 point and keep denoise high for real redraws. Low denoise values deliberately
