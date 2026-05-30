@@ -116,13 +116,24 @@ def _collect_reference_latents(model_apply, model_kwargs):
     refs = []
     from_cond = cond.get("ref_latents", [])
     if from_cond is not None:
-        if isinstance(from_cond, (list, tuple)):
+        if _is_reference_latent_sequence(from_cond):
             refs.extend(list(from_cond))
         else:
             refs.append(from_cond)
     model_obj = getattr(model_apply, "__self__", None)
     refs.extend(list(getattr(model_obj, "anima_ref_latents", [])))
     return refs
+
+
+def _is_reference_latent_sequence(value):
+    if isinstance(value, (list, tuple)):
+        return True
+    try:
+        import comfy.conds
+
+        return isinstance(value, comfy.conds.CONDList)
+    except Exception:
+        return False
 
 
 def _append_reference_latents(x, refs):

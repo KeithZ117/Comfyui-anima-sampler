@@ -8,11 +8,57 @@ from .reference import AnimaCosmosReferenceLatent
 from .repaint import (
     CONTROL_FILL_MODES,
     LATENT_FILL_MODES,
+    REFERENCE_FILL_MODES,
     REPAINT_MODES,
     AnimaCosmosRepaintPrepare,
     _encode_latent_image,
+    _fill_masked_image,
     _normalize_image_tensor,
 )
+
+
+class AnimaTReferenceEditRoute:
+    """Full-image AnimaEdit route: input latent is also the time-axis reference."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "image": ("IMAGE",),
+                "vae": ("VAE",),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL", "LATENT", "LATENT", "STRING")
+    RETURN_NAMES = ("model", "latent", "reference_latent", "log")
+    FUNCTION = "build"
+    CATEGORY = NODE_CATEGORY
+
+    def build(self, model, image, vae):
+        image = _normalize_image_tensor(image)
+        reference_latent = _reference_latent_from_image(vae, image)
+        latent = {"samples": reference_latent["samples"]}
+        patched_model, = AnimaCosmosReferenceLatent().apply(
+            model=model,
+            latent=reference_latent,
+            enabled=True,
+        )
+        log = "\n".join(
+            [
+                "AnimaTReferenceEditRoute",
+                "route: full-image t-reference edit",
+                f"latent_shape: {_shape_text(latent['samples'])}",
+                "reference_method: same VAE-encoded image is used as KSampler latent_image and time-axis reference",
+                "required_model_setup: load an AnimaEdit LoRA before this route",
+                "recommended_sampler: native KSampler er_sde/simple",
+                "recommended_steps: 22",
+                "recommended_cfg: 3.4",
+                "recommended_denoise: 1.0",
+                "prompting: describe the target edit, not the whole source image",
+            ]
+        )
+        return patched_model, latent, reference_latent, log
 
 
 class AnimaTReferenceRepaintRoute:
@@ -39,7 +85,8 @@ class AnimaTReferenceRepaintRoute:
                     "INT",
                     {"default": 48, "min": 0, "max": 512, "step": 1},
                 ),
-                "latent_fill": (LATENT_FILL_MODES, {"default": "latent noise"}),
+                "latent_fill": (LATENT_FILL_MODES, {"default": "neutral gray"}),
+                "reference_fill": (REFERENCE_FILL_MODES, {"default": "neutral gray"}),
                 "noise_seed": (
                     "INT",
                     {"default": 1, "min": 0, "max": 0xFFFFFFFFFFFFFFFF},
@@ -64,6 +111,7 @@ class AnimaTReferenceRepaintRoute:
         mask_grow,
         mask_feather,
         latent_fill,
+        reference_fill,
         noise_seed,
         invert_mask,
     ):
@@ -79,7 +127,7 @@ class AnimaTReferenceRepaintRoute:
                 mask_feather=mask_feather,
                 latent_fill=latent_fill,
                 noise_seed=noise_seed,
-                control_fill="masked black",
+                control_fill=reference_fill,
                 invert_mask=invert_mask,
             )
         )
@@ -97,6 +145,7 @@ class AnimaTReferenceRepaintRoute:
             extra_lines=[
                 "connect_model: route.model -> Anima Flow Corrective Sampler.model",
                 "connect_latent: route.latent -> Anima Flow Corrective Sampler.latent_image",
+                f"reference_fill: {reference_fill}",
                 "controlnet: disabled",
             ],
         )
@@ -126,12 +175,13 @@ class AnimaTReferenceControlRepaintRoute:
                     "INT",
                     {"default": 48, "min": 0, "max": 512, "step": 1},
                 ),
-                "latent_fill": (LATENT_FILL_MODES, {"default": "latent noise"}),
+                "latent_fill": (LATENT_FILL_MODES, {"default": "neutral gray"}),
                 "noise_seed": (
                     "INT",
                     {"default": 1, "min": 0, "max": 0xFFFFFFFFFFFFFFFF},
                 ),
                 "control_fill": (CONTROL_FILL_MODES, {"default": "masked black"}),
+                "reference_fill": (REFERENCE_FILL_MODES, {"default": "neutral gray"}),
                 "invert_mask": ("BOOLEAN", {"default": False}),
             },
         }
@@ -160,11 +210,13 @@ class AnimaTReferenceControlRepaintRoute:
         latent_fill,
         noise_seed,
         control_fill,
+        reference_fill,
         invert_mask,
     ):
+        image = _normalize_image_tensor(image)
         latent, control_image, processed_mask, mask_preview, prepare_log = (
             AnimaCosmosRepaintPrepare().prepare(
-                image=_normalize_image_tensor(image),
+                image=image,
                 mask=mask,
                 vae=vae,
                 mode=mode,
@@ -177,7 +229,8 @@ class AnimaTReferenceControlRepaintRoute:
                 invert_mask=invert_mask,
             )
         )
-        reference_latent = _reference_latent_from_image(vae, control_image)
+        reference_image = _fill_masked_image(image, processed_mask, str(reference_fill))
+        reference_latent = _reference_latent_from_image(vae, reference_image)
         log = _route_log(
             route_name="AnimaTReferenceControlRepaintRoute",
             route="t-reference repaint with external ControlNet/LLLite",
@@ -190,6 +243,7 @@ class AnimaTReferenceControlRepaintRoute:
                     "Latent.latent after the control model/conditioning step"
                 ),
                 "connect_latent: route.latent -> Anima Flow Corrective Sampler.latent_image",
+                f"reference_fill: {reference_fill}",
                 "controlnet: external node required",
             ],
         )
@@ -210,7 +264,7 @@ def _route_log(*, route_name: str, route: str, reference_latent, prepare_log: st
                     f"route: {route}",
                     f"reference_latent_shape: {_shape_text(samples)}",
                     "reference_method: append masked source latent on Cosmos time axis during model apply",
-                    "reference_masking: masked repaint area before encoding the time-axis reference",
+                    "reference_masking: masked repaint area is filled before encoding the time-axis reference",
                     *extra_lines,
                 ]
             ),

@@ -15,7 +15,11 @@ from .flow_constants import (
 from .node_constants import NODE_CATEGORY
 from .reference import AnimaCosmosReferenceLatent, AnimaCosmosReferenceModelPatch
 from .repaint import AnimaCosmosRepaintPrepare, AnimaInpaintLatentPrepare
-from .repaint_routes import AnimaTReferenceControlRepaintRoute, AnimaTReferenceRepaintRoute
+from .repaint_routes import (
+    AnimaTReferenceControlRepaintRoute,
+    AnimaTReferenceEditRoute,
+    AnimaTReferenceRepaintRoute,
+)
 
 ANIMA_FLOW_SETTINGS = "ANIMA_FLOW_SETTINGS"
 DEFAULT_FLOW_SCHEDULE = "flow_rf_linear_shift"
@@ -476,6 +480,8 @@ class AnimaFlowCorrectiveSampler:
         image = _decode_latent_image(vae, latent_out)
         if vae is None:
             log = f"{log}\nimage_output: unavailable (connect VAE)"
+        elif _has_repaint_composite_metadata(latent_out):
+            log = f"{log}\nimage_output: decoded with connected VAE and composited over source image"
         else:
             log = f"{log}\nimage_output: decoded with connected VAE"
         return latent_out, image, log
@@ -575,6 +581,7 @@ NODE_CLASS_MAPPINGS = {
     "AnimaFlowSettings": AnimaFlowSettings,
     "AnimaFlowCorrectiveSampler": AnimaFlowCorrectiveSampler,
     "AnimaInpaintLatentPrepare": AnimaInpaintLatentPrepare,
+    "AnimaTReferenceEditRoute": AnimaTReferenceEditRoute,
     "AnimaTReferenceRepaintRoute": AnimaTReferenceRepaintRoute,
     "AnimaTReferenceControlRepaintRoute": AnimaTReferenceControlRepaintRoute,
     "AnimaCosmosRepaintPrepare": AnimaCosmosRepaintPrepare,
@@ -586,6 +593,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnimaFlowSettings": "Anima Flow Settings",
     "AnimaFlowCorrectiveSampler": "Anima Flow Corrective Sampler",
     "AnimaInpaintLatentPrepare": "Anima Inpaint Latent Prepare",
+    "AnimaTReferenceEditRoute": "Anima T-Reference Edit Route",
     "AnimaTReferenceRepaintRoute": "Anima T-Reference Repaint Route",
     "AnimaTReferenceControlRepaintRoute": "Anima T-Reference Control Repaint Route",
     "AnimaCosmosRepaintPrepare": "Anima Cosmos Repaint Prepare",
@@ -636,7 +644,12 @@ def _decode_latent_image(vae, latent: dict):
     elif ndim not in {4, 5}:
         raise ValueError("VAE image output requires a 4D or 5D latent")
 
-    return _normalize_decoded_image(vae.decode(samples))
+    image = _normalize_decoded_image(vae.decode(samples))
+    return _composite_repaint_image(image, latent)
+
+
+def _has_repaint_composite_metadata(latent: dict) -> bool:
+    return "anima_repaint_source_image" in latent and "anima_repaint_mask" in latent
 
 
 def _vae_latent_dim(vae):
@@ -659,6 +672,69 @@ def _normalize_decoded_image(image):
     if ndim != 4:
         raise ValueError("VAE image output requires a 4D image tensor")
     return image
+
+
+def _composite_repaint_image(image, latent: dict):
+    source = latent.get("anima_repaint_source_image")
+    mask = latent.get("anima_repaint_mask")
+    if source is None or mask is None:
+        return image
+
+    import torch.nn.functional as F
+
+    source = source.to(device=image.device, dtype=image.dtype).clamp(0.0, 1.0)
+    if int(getattr(source, "ndim", len(source.shape))) != 4:
+        return image
+    if int(source.shape[-1]) > int(image.shape[-1]):
+        source = source[..., : int(image.shape[-1])]
+    elif int(source.shape[-1]) < int(image.shape[-1]):
+        return image
+    if int(source.shape[0]) == 1 and int(image.shape[0]) > 1:
+        source = source.repeat(int(image.shape[0]), 1, 1, 1)
+    if int(source.shape[0]) != int(image.shape[0]):
+        return image
+    if int(source.shape[1]) != int(image.shape[1]) or int(source.shape[2]) != int(image.shape[2]):
+        source = F.interpolate(
+            source.movedim(-1, 1),
+            size=(int(image.shape[1]), int(image.shape[2])),
+            mode="bilinear",
+            align_corners=False,
+        ).movedim(1, -1)
+
+    mask = _normalize_repaint_composite_mask(mask, image, F)
+    if mask is None:
+        return image
+    mask = mask.unsqueeze(-1)
+    return (source * (1.0 - mask) + image * mask).clamp(0.0, 1.0)
+
+
+def _normalize_repaint_composite_mask(mask, image, F):
+    ndim = int(getattr(mask, "ndim", len(mask.shape)))
+    if ndim == 2:
+        mask = mask.unsqueeze(0)
+    elif ndim == 4:
+        if int(mask.shape[-1]) == 1:
+            mask = mask[..., 0]
+        elif int(mask.shape[1]) == 1:
+            mask = mask[:, 0]
+        else:
+            return None
+    elif ndim != 3:
+        return None
+
+    mask = mask.to(device=image.device, dtype=image.dtype).clamp(0.0, 1.0)
+    if int(mask.shape[0]) == 1 and int(image.shape[0]) > 1:
+        mask = mask.repeat(int(image.shape[0]), 1, 1)
+    if int(mask.shape[0]) != int(image.shape[0]):
+        return None
+    if int(mask.shape[-2]) != int(image.shape[1]) or int(mask.shape[-1]) != int(image.shape[2]):
+        mask = F.interpolate(
+            mask.unsqueeze(1),
+            size=(int(image.shape[1]), int(image.shape[2])),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(1)
+    return mask.clamp(0.0, 1.0)
 
 
 def _apply_public_cfg_mode(params: dict, cfg_mode: str) -> dict:

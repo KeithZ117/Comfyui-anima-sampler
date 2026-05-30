@@ -59,6 +59,13 @@ in ComfyUI to inspect the example workflow.
 
 - `Anima Flow Corrective Sampler`: the main sampler node.
 - `Anima Flow Settings`: optional advanced controls for solver and CFG tuning.
+- `Anima T-Reference Edit Route`: full-image AnimaEdit route matching the
+  community reference workflow: input image latent is also appended as a Cosmos
+  time-axis reference.
+- `Anima T-Reference Repaint Route`: experimental masked variant with a hard
+  inpaint noise mask and a filled time-axis reference for local repaint tests.
+- `Anima T-Reference Control Repaint Route`: prepares the same masked assets for
+  external LLLite/ControlNet inpaint nodes.
 - `Anima Four Way Comparison`: fixed four-way image grid for UniPC linear
   shift cfg7, PC3 linear shift cfg7, `er_sde + simple` cfg4.5, and
   `er_sde + simple` cfg7.
@@ -74,6 +81,15 @@ Leave `vae` disconnected when you only need the latent output.
 The four-way comparison node requires a `VAE` and outputs a labeled comparison
 image, four individual images, and a log. It is intended for quick visual checks
 against the native `er_sde + simple` baseline.
+
+For AnimaEdit-style image editing, load an AnimaEdit LoRA before
+`Anima T-Reference Edit Route`, then feed its `model` and `latent` outputs to a
+native KSampler. The discussion workflow that motivated this path uses
+`er_sde`, `simple`, `22` steps, `cfg 3.4`, and `denoise 1.0`.
+
+For masked repainting, use `neutral gray` latent/reference fill as the starting
+point and keep denoise high for real redraws. Low denoise values deliberately
+preserve the original image and will look like the mask did not repaint.
 
 `ramp cfg` starts guidance low and smoothly raises it to the selected `cfg`.
 With the default `cfg=7`, it starts near `4.5`, keeps that low guidance through

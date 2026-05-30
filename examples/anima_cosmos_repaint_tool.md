@@ -4,12 +4,51 @@ This branch adds a first-pass repaint toolkit for Anima/Cosmos-style image edits
 
 ## Nodes
 
+### Anima T-Reference Edit Route
+
+Use this route for the workflow from the Anima discussion: full-image edit,
+AnimaEdit LoRA, no inpaint mask. It encodes the input image once and uses that
+same latent as both the KSampler `latent_image` and the Cosmos time-axis
+reference.
+
+Workflow:
+
+```text
+Checkpoint/UNET MODEL
+-> AnimaEdit LoRA
+-> Anima T-Reference Edit Route.model
+
+Load Image.image -> Anima T-Reference Edit Route.image
+VAE              -> Anima T-Reference Edit Route.vae
+
+Anima T-Reference Edit Route.model
+-> native KSampler.model
+
+Anima T-Reference Edit Route.latent
+-> native KSampler.latent_image
+```
+
+Starting settings from the embedded discussion workflow:
+
+```text
+sampler: er_sde
+scheduler: simple
+steps: 22
+cfg: 3.4
+denoise: 1.0
+prompt: describe the target edit
+```
+
+This route needs an AnimaEdit LoRA. Without the edit LoRA, the reference latent
+mostly acts like a strong image-preservation constraint.
+
 ### Route A: Anima T-Reference Repaint Route
 
-Use this route when you do not want ControlNet/LLLite. It masks the repaint
-area out of the reference image, appends that reference latent on the Cosmos
-time axis during model apply, then prepares a masked latent for
-`Anima Flow Corrective Sampler`.
+Use this route when you do not want ControlNet/LLLite. It fills the repaint
+area with `reference_fill` before encoding the time-axis reference latent, then
+prepares a masked latent for `Anima Flow Corrective Sampler`. The default
+`reference_fill: neutral gray` avoids feeding either old masked content or a
+black patch back through the time-axis reference.
 
 Workflow:
 
@@ -30,11 +69,12 @@ Starting settings:
 
 ```text
 mode: structure repaint
-latent_fill: latent noise
+latent_fill: neutral gray
+reference_fill: neutral gray
 mask_grow: 24-48
-mask_feather: 32-64
-denoise: 0.55-0.85
-cfg: 4.0-5.5
+mask_feather: 16-48
+denoise: 0.85-1.00
+cfg: 3.5-5.0
 ```
 
 This is the route inspired by the discussion workflow that uses the model/UNet
@@ -46,8 +86,9 @@ Use this route when you want to combine the time-axis reference trick with
 Anima LLLite or another ControlNet-style node. This node intentionally has no
 `MODEL` input so it can prepare the shared assets without creating a connection
 cycle around external ControlNet nodes. The emitted `reference_latent` is
-encoded from the same masked control image, so the old pixels inside the repaint
-area are not copied back through the time-axis reference.
+encoded from `reference_fill`, while `control_image` still follows
+`control_fill`. This keeps LLLite's masked-black control input separate from
+the time-axis reference, so black fill is not copied back through the model.
 
 Workflow for LLLite or a model-patching ControlNet:
 
@@ -90,6 +131,12 @@ Keep `control_fill: masked black` for Anima LLLite inpaint weights. The LLLite
 inpaint model was trained with masked RGB plus a binary mask as 4-channel
 conditioning, so this route outputs both `control_image` and `mask`.
 
+For the final image output, connect the same VAE to
+`Anima Flow Corrective Sampler.vae` and use the sampler's `image` output. Repaint
+latents carry the original image and processed mask so the sampler composites
+the decoded repaint back over the source image; this avoids showing the full
+VAE-decoded source and reduces visible seams outside the mask.
+
 ### Anima Inpaint Latent Prepare
 
 Use this lower-level node when you only want a sampler-ready masked latent.
@@ -111,7 +158,7 @@ The node only prepares the inpaint latent:
 ```text
 image + mask
 -> VAE encode
--> replace masked latent area with noise
+-> fill masked area before encode
 -> attach latent noise_mask
 ```
 
@@ -122,19 +169,18 @@ Starting settings:
 ```text
 steps: 18
 cfg: 4.5
-denoise: 0.45
+denoise: 0.55
 flow_solver: flow_unipc2_x0
 mask_grow: 32
 mask_feather: 16
-latent_fill: latent noise
-noise_seed: same seed you want for the masked latent start
+latent_fill: neutral gray
+noise_seed: only used by latent_fill: latent noise
 ```
 
-For light edge cleanup, reduce `denoise` to `0.25-0.35`. For structural
-redraws such as hands, use `0.45-0.60` and mask the whole local structure.
+For light edge cleanup, reduce `denoise` to `0.35-0.55`. For structural
+redraws such as hands, use `0.85-1.00` and mask the whole local structure.
 Use `latent_fill: original` only when you want masked img2img behavior. Avoid
-`masked black` and `neutral gray` for normal inpaint; those are diagnostic
-fills and can leave color remnants because Anima treats them as image content.
+`masked black` unless you are explicitly testing black-fill artifacts.
 
 ### Anima Cosmos Repaint Prepare
 
@@ -146,25 +192,26 @@ Inputs:
 - `mode`: `upscale clean`, `edge repair`, or `structure repaint`.
 - `mask_threshold`: `0` selects any nonzero mask pixel; higher values require
   mask opacity greater than or equal to the threshold.
-- `mask_grow` / `mask_feather`: expand and soften the repaint region.
+- `mask_grow` / `mask_feather`: expand the sampler repaint region, then soften
+  only the preview/final composite edge.
 - `latent_fill`: how the sampler latent is initialized inside the mask.
 - `noise_seed`: deterministic seed for `latent_fill: latent noise`.
 - `control_fill`: how the control/reference image is initialized inside the mask.
 
 Outputs:
 
-- `latent`: encoded latent with `noise_mask` already attached.
+- `latent`: encoded latent with a hard grown `noise_mask` already attached.
 - `control_image`: masked image for Anima LLLite or reference workflows.
-- `mask`: processed soft mask.
+- `mask`: processed soft mask for preview/control/composite.
 - `mask_preview`: red overlay preview.
 - `log`: recommended sampler settings for the selected mode.
 
 Recommended starting settings:
 
 ```text
-upscale clean:      steps 16, cfg 4.5, denoise 0.22
-edge repair:        steps 16, cfg 4.5, denoise 0.32
-structure repaint:  steps 22, cfg 4.2, denoise 0.52
+upscale clean:      steps 16, cfg 4.5, denoise 0.30
+edge repair:        steps 18, cfg 4.3, denoise 0.55
+structure repaint:  steps 22, cfg 4.0, denoise 0.90
 ```
 
 ### Anima Cosmos Reference Latent
@@ -211,7 +258,7 @@ Use Route A first for small edits and local cleanup:
 ```text
 target: preserve original identity, color, style, pose
 mask: small to medium
-denoise: 0.18-0.35
+denoise: 0.35-0.55
 ```
 
 Use Route B with LLLite/ControlNet inpaint when structure is actually wrong:
@@ -219,7 +266,7 @@ Use Route B with LLLite/ControlNet inpaint when structure is actually wrong:
 ```text
 target: rebuild hands, fingers, clothing, local objects
 mask: whole anatomical/object region
-denoise: 0.35-0.60
+denoise: 0.85-1.00
 ```
 
 For upscale cleanup, run a paired test before promoting a default:

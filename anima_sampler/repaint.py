@@ -9,6 +9,7 @@ from .node_constants import NODE_CATEGORY
 REPAINT_MODES = ["upscale clean", "edge repair", "structure repaint"]
 LATENT_FILL_MODES = ["latent noise", "original", "masked black", "neutral gray"]
 CONTROL_FILL_MODES = ["masked black", "neutral gray", "blurred reference"]
+REFERENCE_FILL_MODES = ["neutral gray", "blurred reference", "masked black"]
 
 
 class AnimaInpaintLatentPrepare:
@@ -33,7 +34,7 @@ class AnimaInpaintLatentPrepare:
                     "INT",
                     {"default": 16, "min": 0, "max": 512, "step": 1},
                 ),
-                "latent_fill": (LATENT_FILL_MODES, {"default": "latent noise"}),
+                "latent_fill": (LATENT_FILL_MODES, {"default": "neutral gray"}),
                 "noise_seed": (
                     "INT",
                     {"default": 1, "min": 0, "max": 0xFFFFFFFFFFFFFFFF},
@@ -77,7 +78,7 @@ class AnimaInpaintLatentPrepare:
         log = "\n\n".join(
             [
                 "AnimaInpaintLatentPrepare",
-                "workflow: image+mask -> VAE encode -> masked latent noise -> noise_mask",
+                "workflow: image+mask -> filled VAE encode -> hard noise_mask",
                 "next_node: connect latent to Anima Flow Corrective Sampler latent_image",
                 "controlnet: disabled",
                 "prepare_log:",
@@ -110,7 +111,7 @@ class AnimaCosmosRepaintPrepare:
                     "INT",
                     {"default": 16, "min": 0, "max": 512, "step": 1},
                 ),
-                "latent_fill": (LATENT_FILL_MODES, {"default": "latent noise"}),
+                "latent_fill": (LATENT_FILL_MODES, {"default": "neutral gray"}),
                 "noise_seed": (
                     "INT",
                     {"default": 1, "min": 0, "max": 0xFFFFFFFFFFFFFFFF},
@@ -148,19 +149,25 @@ class AnimaCosmosRepaintPrepare:
             invert=invert_mask,
         )
         grown_mask = _grow_mask(hard_mask, int(mask_grow))
-        soft_mask = _feather_mask(grown_mask, int(mask_feather))
+        sample_mask = grown_mask.clamp(0.0, 1.0)
+        soft_mask = _feather_mask(sample_mask, int(mask_feather))
 
         if _normalized_fill_mode(latent_fill_mode) == "latent noise":
             latent_pixels = image
         else:
-            latent_pixels = _fill_masked_image(image, soft_mask, latent_fill_mode)
-        control_image = _fill_masked_image(image, soft_mask, str(control_fill))
+            latent_pixels = _fill_masked_image(image, sample_mask, latent_fill_mode)
+        control_image = _fill_masked_image(image, sample_mask, str(control_fill))
         samples = _encode_latent_image(vae, latent_pixels)
-        noise_mask = _resize_mask_to_latent(soft_mask, samples)
+        noise_mask = _resize_mask_to_latent(sample_mask, samples, binary=True)
         samples = _fill_masked_latent(samples, noise_mask, latent_fill_mode, int(noise_seed))
         mask_preview = _build_mask_preview(image, soft_mask)
 
-        latent = {"samples": samples, "noise_mask": noise_mask}
+        latent = {
+            "samples": samples,
+            "noise_mask": noise_mask,
+            "anima_repaint_source_image": image,
+            "anima_repaint_mask": soft_mask,
+        }
         profile = _repaint_profile(mode)
         log = "\n".join(
             [
@@ -179,7 +186,9 @@ class AnimaCosmosRepaintPrepare:
                 f"image_shape: {_shape_text(image)}",
                 f"latent_shape: {_shape_text(samples)}",
                 f"noise_mask_shape: {_shape_text(noise_mask)}",
-                "noise_mask: white/1.0 is repaint area; black/0.0 is keep area",
+                "fill_mask: hard grown mask is used for latent/control/reference fill",
+                "noise_mask: hard grown mask; white/1.0 is repaint area; black/0.0 is keep area",
+                "composite_mask: feathered mask is kept for preview/output compositing only",
                 "mask_threshold: 0 selects any nonzero mask; higher values require mask >= threshold",
                 (
                     "control_image: feed to Anima LLLite inpaint/any-test nodes "
@@ -340,19 +349,27 @@ def _box_blur_image(image, *, radius: int):
     return blurred.movedim(1, -1).clamp(0.0, 1.0)
 
 
-def _resize_mask_to_latent(mask, samples):
+def _resize_mask_to_latent(mask, samples, *, binary: bool = False):
     _, F = _torch_modules()
     ndim = int(getattr(samples, "ndim", len(samples.shape)))
     if ndim in {4, 5}:
         latent_h, latent_w = int(samples.shape[-2]), int(samples.shape[-1])
     else:
         raise ValueError("latent samples must be 4D or 5D")
-    resized = F.interpolate(
-        mask.unsqueeze(1).float(),
-        size=(latent_h, latent_w),
-        mode="bilinear",
-        align_corners=False,
-    )
+    if binary:
+        resized = F.interpolate(
+            mask.unsqueeze(1).float(),
+            size=(latent_h, latent_w),
+            mode="area",
+        )
+        resized = (resized > 0.0).to(dtype=samples.dtype)
+    else:
+        resized = F.interpolate(
+            mask.unsqueeze(1).float(),
+            size=(latent_h, latent_w),
+            mode="bilinear",
+            align_corners=False,
+        )
     return resized.to(device=samples.device, dtype=samples.dtype).clamp(0.0, 1.0)
 
 
@@ -366,9 +383,9 @@ def _build_mask_preview(image, mask):
 def _repaint_profile(mode: str) -> dict:
     mode = str(mode).strip().lower()
     profiles = {
-        "upscale clean": {"steps": 16, "cfg": 4.5, "denoise": 0.22},
-        "edge repair": {"steps": 16, "cfg": 4.5, "denoise": 0.32},
-        "structure repaint": {"steps": 22, "cfg": 4.2, "denoise": 0.52},
+        "upscale clean": {"steps": 16, "cfg": 4.5, "denoise": 0.30},
+        "edge repair": {"steps": 18, "cfg": 4.3, "denoise": 0.55},
+        "structure repaint": {"steps": 22, "cfg": 4.0, "denoise": 0.90},
     }
     if mode not in profiles:
         allowed = ", ".join(REPAINT_MODES)
