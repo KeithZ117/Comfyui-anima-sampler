@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from .flow_math import _make_generator, _randn_like
 from .latent_utils import _shape_text
 from .node_constants import NODE_CATEGORY
 
 REPAINT_MODES = ["upscale clean", "edge repair", "structure repaint"]
-LATENT_FILL_MODES = ["original", "masked black", "neutral gray"]
+LATENT_FILL_MODES = ["latent noise", "original", "masked black", "neutral gray"]
 CONTROL_FILL_MODES = ["masked black", "neutral gray", "blurred reference"]
 
 
@@ -32,7 +33,11 @@ class AnimaInpaintLatentPrepare:
                     "INT",
                     {"default": 16, "min": 0, "max": 512, "step": 1},
                 ),
-                "latent_fill": (LATENT_FILL_MODES, {"default": "masked black"}),
+                "latent_fill": (LATENT_FILL_MODES, {"default": "latent noise"}),
+                "noise_seed": (
+                    "INT",
+                    {"default": 1, "min": 0, "max": 0xFFFFFFFFFFFFFFFF},
+                ),
                 "invert_mask": ("BOOLEAN", {"default": False}),
             },
         }
@@ -51,6 +56,7 @@ class AnimaInpaintLatentPrepare:
         mask_grow,
         mask_feather,
         latent_fill,
+        noise_seed,
         invert_mask,
     ):
         latent, _control_image, processed_mask, mask_preview, prep_log = (
@@ -63,6 +69,7 @@ class AnimaInpaintLatentPrepare:
                 mask_grow=mask_grow,
                 mask_feather=mask_feather,
                 latent_fill=latent_fill,
+                noise_seed=noise_seed,
                 control_fill="masked black",
                 invert_mask=invert_mask,
             )
@@ -70,7 +77,7 @@ class AnimaInpaintLatentPrepare:
         log = "\n\n".join(
             [
                 "AnimaInpaintLatentPrepare",
-                "workflow: image+mask -> VAE encode for inpaint -> latent noise_mask",
+                "workflow: image+mask -> VAE encode -> masked latent noise -> noise_mask",
                 "next_node: connect latent to Anima Flow Corrective Sampler latent_image",
                 "controlnet: disabled",
                 "prepare_log:",
@@ -103,7 +110,11 @@ class AnimaCosmosRepaintPrepare:
                     "INT",
                     {"default": 16, "min": 0, "max": 512, "step": 1},
                 ),
-                "latent_fill": (LATENT_FILL_MODES, {"default": "original"}),
+                "latent_fill": (LATENT_FILL_MODES, {"default": "latent noise"}),
+                "noise_seed": (
+                    "INT",
+                    {"default": 1, "min": 0, "max": 0xFFFFFFFFFFFFFFFF},
+                ),
                 "control_fill": (CONTROL_FILL_MODES, {"default": "masked black"}),
                 "invert_mask": ("BOOLEAN", {"default": False}),
             },
@@ -124,10 +135,12 @@ class AnimaCosmosRepaintPrepare:
         mask_grow,
         mask_feather,
         latent_fill,
+        noise_seed,
         control_fill,
         invert_mask,
     ):
         image = _normalize_image_tensor(image)
+        latent_fill_mode = str(latent_fill)
         hard_mask = _normalize_mask_tensor(
             mask,
             image,
@@ -137,10 +150,14 @@ class AnimaCosmosRepaintPrepare:
         grown_mask = _grow_mask(hard_mask, int(mask_grow))
         soft_mask = _feather_mask(grown_mask, int(mask_feather))
 
-        latent_pixels = _fill_masked_image(image, soft_mask, str(latent_fill))
+        if _normalized_fill_mode(latent_fill_mode) == "latent noise":
+            latent_pixels = image
+        else:
+            latent_pixels = _fill_masked_image(image, soft_mask, latent_fill_mode)
         control_image = _fill_masked_image(image, grown_mask, str(control_fill))
         samples = _encode_latent_image(vae, latent_pixels)
         noise_mask = _resize_mask_to_latent(soft_mask, samples)
+        samples = _fill_masked_latent(samples, noise_mask, latent_fill_mode, int(noise_seed))
         mask_preview = _build_mask_preview(image, soft_mask)
 
         latent = {"samples": samples, "noise_mask": noise_mask}
@@ -156,12 +173,14 @@ class AnimaCosmosRepaintPrepare:
                 f"mask_grow: {int(mask_grow)}",
                 f"mask_feather: {int(mask_feather)}",
                 f"latent_fill: {latent_fill}",
+                f"noise_seed: {int(noise_seed)}",
                 f"control_fill: {control_fill}",
                 f"invert_mask: {bool(invert_mask)}",
                 f"image_shape: {_shape_text(image)}",
                 f"latent_shape: {_shape_text(samples)}",
                 f"noise_mask_shape: {_shape_text(noise_mask)}",
                 "noise_mask: white/1.0 is repaint area; black/0.0 is keep area",
+                "mask_threshold: 0 selects any nonzero mask; higher values require mask >= threshold",
                 (
                     "control_image: feed to Anima LLLite inpaint/any-test nodes "
                     "or to a reference-latent edit path"
@@ -185,6 +204,30 @@ def _encode_latent_image(vae, image):
     if ndim not in {4, 5}:
         raise ValueError("VAE encode must return a 4D or 5D latent tensor")
     return encoded
+
+
+def _fill_masked_latent(samples, noise_mask, mode: str, seed: int):
+    mode = _normalized_fill_mode(mode)
+    if mode != "latent noise":
+        return samples
+    if seed < 0 or seed > 0xFFFFFFFFFFFFFFFF:
+        raise ValueError("noise_seed must be in the range [0, 2^64 - 1]")
+
+    torch, _ = _torch_modules()
+    generator = _make_generator(torch, samples.device, int(seed))
+    noise = _randn_like(torch, samples, generator)
+    blend_mask = _latent_blend_mask(noise_mask, samples)
+    return samples * (1.0 - blend_mask) + noise * blend_mask
+
+
+def _latent_blend_mask(noise_mask, samples):
+    sample_ndim = int(getattr(samples, "ndim", len(samples.shape)))
+    mask = noise_mask.to(device=samples.device, dtype=samples.dtype)
+    if sample_ndim == 4:
+        return mask
+    if sample_ndim == 5:
+        return mask.unsqueeze(2)
+    raise ValueError("latent samples must be 4D or 5D")
 
 
 def _normalize_image_tensor(image):
@@ -230,6 +273,8 @@ def _normalize_mask_tensor(mask, image, *, threshold, invert):
     threshold = float(threshold)
     if not (0.0 <= threshold <= 1.0):
         raise ValueError("mask_threshold must be in the range [0, 1]")
+    if threshold <= 0.0:
+        return torch.where(mask > 0.0, torch.ones_like(mask), torch.zeros_like(mask))
     return torch.where(mask >= threshold, torch.ones_like(mask), torch.zeros_like(mask))
 
 
@@ -257,8 +302,10 @@ def _feather_mask(mask, radius: int):
 
 
 def _fill_masked_image(image, mask, mode: str):
-    mode = str(mode).strip().lower()
+    mode = _normalized_fill_mode(mode)
     if mode == "original":
+        return image
+    if mode == "latent noise":
         return image
     mask4 = mask.unsqueeze(-1).to(dtype=image.dtype, device=image.device)
     if mode == "masked black":
@@ -271,6 +318,10 @@ def _fill_masked_image(image, mask, mode: str):
         allowed = ", ".join(sorted(set(LATENT_FILL_MODES + CONTROL_FILL_MODES)))
         raise ValueError(f"fill mode must be one of: {allowed}")
     return (image * (1.0 - mask4) + fill * mask4).clamp(0.0, 1.0)
+
+
+def _normalized_fill_mode(mode: str) -> str:
+    return str(mode).strip().lower()
 
 
 def _box_blur_image(image, *, radius: int):

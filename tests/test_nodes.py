@@ -381,6 +381,7 @@ class NodeRegistrationTests(unittest.TestCase):
             mask_grow=1,
             mask_feather=1,
             latent_fill="original",
+            noise_seed=1,
             control_fill="masked black",
             invert_mask=False,
         )
@@ -403,6 +404,8 @@ class NodeRegistrationTests(unittest.TestCase):
         self.assertNotIn("model", inputs)
         self.assertNotIn("positive", inputs)
         self.assertNotIn("negative", inputs)
+        self.assertEqual(inputs["latent_fill"][1]["default"], "latent noise")
+        self.assertIn("noise_seed", inputs)
         self.assertEqual(
             AnimaInpaintLatentPrepare.RETURN_TYPES,
             ("LATENT", "MASK", "IMAGE", "STRING"),
@@ -423,19 +426,77 @@ class NodeRegistrationTests(unittest.TestCase):
                 mask_threshold=0.5,
                 mask_grow=0,
                 mask_feather=0,
-                latent_fill="masked black",
+                latent_fill="latent noise",
+                noise_seed=123,
                 invert_mask=False,
             )
         )
 
-        self.assertIs(latent["samples"], samples)
+        self.assertFalse(torch.equal(latent["samples"], samples))
         self.assertIn("noise_mask", latent)
         self.assertEqual(tuple(latent["noise_mask"].shape), (1, 1, 2, 2))
         self.assertEqual(tuple(out_mask.shape), (1, 8, 8))
         self.assertEqual(tuple(preview.shape), (1, 8, 8, 3))
-        self.assertLess(float(vae.encoded_image[:, 2:6, 2:6].max()), 1.0)
+        self.assertTrue(torch.equal(vae.encoded_image, image))
         self.assertIn("next_node: connect latent to Anima Flow Corrective Sampler", log)
         self.assertIn("controlnet: disabled", log)
+
+    def test_inpaint_latent_noise_is_seeded_and_mask_limited(self):
+        image = torch.ones(1, 2, 2, 3)
+        mask = torch.tensor([[[1.0, 0.0], [0.0, 0.0]]])
+        samples = torch.zeros(1, 16, 2, 2)
+
+        latent_a, _out_mask, _preview, _log = AnimaInpaintLatentPrepare().prepare(
+            image=image,
+            mask=mask,
+            vae=_DummyEncodeVAE(samples=samples),
+            mask_threshold=0.5,
+            mask_grow=0,
+            mask_feather=0,
+            latent_fill="latent noise",
+            noise_seed=99,
+            invert_mask=False,
+        )
+        latent_b, _out_mask, _preview, _log = AnimaInpaintLatentPrepare().prepare(
+            image=image,
+            mask=mask,
+            vae=_DummyEncodeVAE(samples=samples),
+            mask_threshold=0.5,
+            mask_grow=0,
+            mask_feather=0,
+            latent_fill="latent noise",
+            noise_seed=99,
+            invert_mask=False,
+        )
+
+        self.assertTrue(torch.equal(latent_a["samples"], latent_b["samples"]))
+        self.assertGreater(float(latent_a["samples"][..., 0, 0].abs().sum()), 0.0)
+        self.assertEqual(float(latent_a["samples"][..., 0, 1].abs().sum()), 0.0)
+        self.assertEqual(float(latent_a["samples"][..., 1, 0].abs().sum()), 0.0)
+        self.assertEqual(float(latent_a["samples"][..., 1, 1].abs().sum()), 0.0)
+
+    def test_zero_mask_threshold_selects_only_nonzero_mask_pixels(self):
+        image = torch.ones(1, 2, 2, 3)
+        mask = torch.tensor([[[0.0, 0.25], [0.0, 0.0]]])
+        vae = _DummyEncodeVAE(samples=torch.zeros(1, 16, 2, 2))
+
+        AnimaCosmosRepaintPrepare().prepare(
+            image=image,
+            mask=mask,
+            vae=vae,
+            mode="edge repair",
+            mask_threshold=0.0,
+            mask_grow=0,
+            mask_feather=0,
+            latent_fill="masked black",
+            noise_seed=1,
+            control_fill="masked black",
+            invert_mask=False,
+        )
+
+        self.assertEqual(float(vae.encoded_image[0, 0, 0, 0]), 1.0)
+        self.assertEqual(float(vae.encoded_image[0, 0, 1, 0]), 0.0)
+        self.assertEqual(float(vae.encoded_image[0, 1, 0, 0]), 1.0)
 
     def test_repaint_prepare_can_invert_mask_and_fill_latent(self):
         image = torch.ones(1, 4, 4, 3)
@@ -452,6 +513,7 @@ class NodeRegistrationTests(unittest.TestCase):
             mask_grow=0,
             mask_feather=0,
             latent_fill="neutral gray",
+            noise_seed=1,
             control_fill="neutral gray",
             invert_mask=True,
         )

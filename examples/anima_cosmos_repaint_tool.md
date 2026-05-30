@@ -25,6 +25,7 @@ The node only prepares the inpaint latent:
 ```text
 image + mask
 -> VAE encode
+-> replace masked latent area with noise
 -> attach latent noise_mask
 ```
 
@@ -39,11 +40,15 @@ denoise: 0.45
 flow_solver: flow_unipc2_x0
 mask_grow: 32
 mask_feather: 16
-latent_fill: masked black
+latent_fill: latent noise
+noise_seed: same seed you want for the masked latent start
 ```
 
 For light edge cleanup, reduce `denoise` to `0.25-0.35`. For structural
 redraws such as hands, use `0.45-0.60` and mask the whole local structure.
+Use `latent_fill: original` only when you want masked img2img behavior. Avoid
+`masked black` and `neutral gray` for normal inpaint; those are diagnostic
+fills and can leave color remnants because Anima treats them as image content.
 
 ### Anima Cosmos Repaint Prepare
 
@@ -53,8 +58,11 @@ Inputs:
 - `mask`: white is repaint area, black is keep area.
 - `vae`: encodes the source or filled image into a sampler latent.
 - `mode`: `upscale clean`, `edge repair`, or `structure repaint`.
+- `mask_threshold`: `0` selects any nonzero mask pixel; higher values require
+  mask opacity greater than or equal to the threshold.
 - `mask_grow` / `mask_feather`: expand and soften the repaint region.
 - `latent_fill`: how the sampler latent is initialized inside the mask.
+- `noise_seed`: deterministic seed for `latent_fill: latent noise`.
 - `control_fill`: how the control/reference image is initialized inside the mask.
 
 Outputs:
