@@ -68,13 +68,7 @@ class AnimaTReferenceRepaintRoute:
         invert_mask,
     ):
         image = _normalize_image_tensor(image)
-        reference_latent = _reference_latent_from_image(vae, image)
-        patched_model, = AnimaCosmosReferenceLatent().apply(
-            model=model,
-            latent=reference_latent,
-            enabled=True,
-        )
-        latent, _control_image, processed_mask, mask_preview, prepare_log = (
+        latent, reference_image, processed_mask, mask_preview, prepare_log = (
             AnimaCosmosRepaintPrepare().prepare(
                 image=image,
                 mask=mask,
@@ -88,6 +82,12 @@ class AnimaTReferenceRepaintRoute:
                 control_fill="masked black",
                 invert_mask=invert_mask,
             )
+        )
+        reference_latent = _reference_latent_from_image(vae, reference_image)
+        patched_model, = AnimaCosmosReferenceLatent().apply(
+            model=model,
+            latent=reference_latent,
+            enabled=True,
         )
         log = _route_log(
             route_name="AnimaTReferenceRepaintRoute",
@@ -162,11 +162,9 @@ class AnimaTReferenceControlRepaintRoute:
         control_fill,
         invert_mask,
     ):
-        image = _normalize_image_tensor(image)
-        reference_latent = _reference_latent_from_image(vae, image)
         latent, control_image, processed_mask, mask_preview, prepare_log = (
             AnimaCosmosRepaintPrepare().prepare(
-                image=image,
+                image=_normalize_image_tensor(image),
                 mask=mask,
                 vae=vae,
                 mode=mode,
@@ -179,6 +177,7 @@ class AnimaTReferenceControlRepaintRoute:
                 invert_mask=invert_mask,
             )
         )
+        reference_latent = _reference_latent_from_image(vae, control_image)
         log = _route_log(
             route_name="AnimaTReferenceControlRepaintRoute",
             route="t-reference repaint with external ControlNet/LLLite",
@@ -210,7 +209,8 @@ def _route_log(*, route_name: str, route: str, reference_latent, prepare_log: st
                 [
                     f"route: {route}",
                     f"reference_latent_shape: {_shape_text(samples)}",
-                    "reference_method: append source latent on Cosmos time axis during model apply",
+                    "reference_method: append masked source latent on Cosmos time axis during model apply",
+                    "reference_masking: masked repaint area before encoding the time-axis reference",
                     *extra_lines,
                 ]
             ),

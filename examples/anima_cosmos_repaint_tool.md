@@ -6,9 +6,10 @@ This branch adds a first-pass repaint toolkit for Anima/Cosmos-style image edits
 
 ### Route A: Anima T-Reference Repaint Route
 
-Use this route when you do not want ControlNet/LLLite. It patches the model so
-the source image latent is appended on the Cosmos time axis during model apply,
-then it prepares a masked latent for `Anima Flow Corrective Sampler`.
+Use this route when you do not want ControlNet/LLLite. It masks the repaint
+area out of the reference image, appends that reference latent on the Cosmos
+time axis during model apply, then prepares a masked latent for
+`Anima Flow Corrective Sampler`.
 
 Workflow:
 
@@ -44,7 +45,9 @@ forward path directly instead of training an inpaint ControlNet.
 Use this route when you want to combine the time-axis reference trick with
 Anima LLLite or another ControlNet-style node. This node intentionally has no
 `MODEL` input so it can prepare the shared assets without creating a connection
-cycle around external ControlNet nodes.
+cycle around external ControlNet nodes. The emitted `reference_latent` is
+encoded from the same masked control image, so the old pixels inside the repaint
+area are not copied back through the time-axis reference.
 
 Workflow for LLLite or a model-patching ControlNet:
 

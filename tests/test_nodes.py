@@ -401,6 +401,30 @@ class NodeRegistrationTests(unittest.TestCase):
         self.assertIn("recommended_denoise: 0.52", log)
         self.assertIn("noise_mask_shape: [1, 1, 2, 2]", log)
 
+    def test_repaint_feather_preserves_mask_core_and_softens_control_edge(self):
+        image = torch.ones(1, 7, 7, 3)
+        mask = torch.zeros(1, 7, 7)
+        mask[:, 3, 3] = 1.0
+        vae = _DummyEncodeVAE(samples=torch.zeros(1, 16, 2, 2))
+
+        _latent, control, out_mask, _preview, _log = AnimaCosmosRepaintPrepare().prepare(
+            image=image,
+            mask=mask,
+            vae=vae,
+            mode="edge repair",
+            mask_threshold=0.5,
+            mask_grow=0,
+            mask_feather=2,
+            latent_fill="original",
+            noise_seed=1,
+            control_fill="masked black",
+            invert_mask=False,
+        )
+
+        self.assertEqual(float(out_mask[0, 3, 3]), 1.0)
+        self.assertGreater(float(out_mask[0, 3, 4]), 0.0)
+        self.assertLess(float(control[0, 3, 4, 0]), 1.0)
+
     def test_inpaint_latent_prepare_exposes_image_mask_workflow(self):
         inputs = AnimaInpaintLatentPrepare.INPUT_TYPES()["required"]
 
@@ -532,7 +556,7 @@ class NodeRegistrationTests(unittest.TestCase):
         mask[:, 2:6, 2:6] = 1.0
         reference_samples = torch.full((1, 16, 2, 2), 2.0)
         latent_samples = torch.zeros(1, 16, 2, 2)
-        vae = _SequenceEncodeVAE([reference_samples, latent_samples])
+        vae = _SequenceEncodeVAE([latent_samples, reference_samples])
         model = _DummyModelPatcher()
 
         patched, latent, out_mask, preview, log = AnimaTReferenceRepaintRoute().build(
@@ -555,7 +579,10 @@ class NodeRegistrationTests(unittest.TestCase):
         self.assertIs(patched.model_options["anima_ref_latents"][0], reference_samples)
         self.assertEqual(tuple(out_mask.shape), (1, 8, 8))
         self.assertEqual(tuple(preview.shape), (1, 8, 8, 3))
+        self.assertEqual(float(vae.encoded_images[1][:, 2:6, 2:6].max()), 0.0)
+        self.assertEqual(float(vae.encoded_images[1][:, :2, :, :].min()), 1.0)
         self.assertIn("no-controlnet t-reference repaint", log)
+        self.assertIn("reference_masking", log)
         self.assertIn("connect_model: route.model", log)
 
     def test_t_reference_control_route_outputs_reference_control_and_latent(self):
@@ -564,7 +591,7 @@ class NodeRegistrationTests(unittest.TestCase):
         mask[:, 2:6, 2:6] = 1.0
         reference_samples = torch.full((1, 16, 2, 2), 2.0)
         latent_samples = torch.zeros(1, 16, 2, 2)
-        vae = _SequenceEncodeVAE([reference_samples, latent_samples])
+        vae = _SequenceEncodeVAE([latent_samples, reference_samples])
 
         reference_latent, latent, control, out_mask, preview, log = (
             AnimaTReferenceControlRepaintRoute().prepare(
@@ -588,7 +615,9 @@ class NodeRegistrationTests(unittest.TestCase):
         self.assertEqual(tuple(out_mask.shape), (1, 8, 8))
         self.assertEqual(tuple(preview.shape), (1, 8, 8, 3))
         self.assertLess(float(control[:, 2:6, 2:6].max()), 1.0)
+        self.assertEqual(float(vae.encoded_images[1][:, 2:6, 2:6].max()), 0.0)
         self.assertIn("external ControlNet/LLLite", log)
+        self.assertIn("reference_masking", log)
         self.assertIn("connect_reference: reference_latent", log)
 
     def test_control_route_has_no_model_input_to_avoid_controlnet_cycles(self):

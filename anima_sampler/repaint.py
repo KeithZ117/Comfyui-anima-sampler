@@ -154,7 +154,7 @@ class AnimaCosmosRepaintPrepare:
             latent_pixels = image
         else:
             latent_pixels = _fill_masked_image(image, soft_mask, latent_fill_mode)
-        control_image = _fill_masked_image(image, grown_mask, str(control_fill))
+        control_image = _fill_masked_image(image, soft_mask, str(control_fill))
         samples = _encode_latent_image(vae, latent_pixels)
         noise_mask = _resize_mask_to_latent(soft_mask, samples)
         samples = _fill_masked_latent(samples, noise_mask, latent_fill_mode, int(noise_seed))
@@ -289,7 +289,7 @@ def _grow_mask(mask, radius: int):
 def _feather_mask(mask, radius: int):
     if radius <= 0:
         return mask.clamp(0.0, 1.0)
-    _, F = _torch_modules()
+    torch, F = _torch_modules()
     kernel = int(radius) * 2 + 1
     soft = F.avg_pool2d(
         mask.unsqueeze(1),
@@ -298,7 +298,7 @@ def _feather_mask(mask, radius: int):
         padding=int(radius),
         count_include_pad=False,
     ).squeeze(1)
-    return soft.clamp(0.0, 1.0)
+    return torch.maximum(mask, soft).clamp(0.0, 1.0)
 
 
 def _fill_masked_image(image, mask, mode: str):
