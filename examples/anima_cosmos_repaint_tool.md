@@ -4,10 +4,93 @@ This branch adds a first-pass repaint toolkit for Anima/Cosmos-style image edits
 
 ## Nodes
 
+### Route A: Anima T-Reference Repaint Route
+
+Use this route when you do not want ControlNet/LLLite. It patches the model so
+the source image latent is appended on the Cosmos time axis during model apply,
+then it prepares a masked latent for `Anima Flow Corrective Sampler`.
+
+Workflow:
+
+```text
+Checkpoint MODEL -> Anima T-Reference Repaint Route.model
+Load Image.image -> Anima T-Reference Repaint Route.image
+Load Image.mask  -> Anima T-Reference Repaint Route.mask
+VAE              -> Anima T-Reference Repaint Route.vae
+
+Anima T-Reference Repaint Route.model
+-> Anima Flow Corrective Sampler.model
+
+Anima T-Reference Repaint Route.latent
+-> Anima Flow Corrective Sampler.latent_image
+```
+
+Starting settings:
+
+```text
+mode: structure repaint
+latent_fill: latent noise
+mask_grow: 24-48
+mask_feather: 32-64
+denoise: 0.55-0.85
+cfg: 4.0-5.5
+```
+
+This is the route inspired by the discussion workflow that uses the model/UNet
+forward path directly instead of training an inpaint ControlNet.
+
+### Route B: Anima T-Reference Control Repaint Route
+
+Use this route when you want to combine the time-axis reference trick with
+Anima LLLite or another ControlNet-style node. This node intentionally has no
+`MODEL` input so it can prepare the shared assets without creating a connection
+cycle around external ControlNet nodes.
+
+Workflow for LLLite or a model-patching ControlNet:
+
+```text
+Load Image.image -> Anima T-Reference Control Repaint Route.image
+Load Image.mask  -> Anima T-Reference Control Repaint Route.mask
+VAE              -> Anima T-Reference Control Repaint Route.vae
+
+Route.control_image + Route.mask
+-> Anima LLLite / ControlNet apply
+
+Control-patched MODEL
+-> Anima Cosmos Reference Latent.model
+
+Route.reference_latent
+-> Anima Cosmos Reference Latent.latent
+
+Anima Cosmos Reference Latent.model
+-> Anima Flow Corrective Sampler.model
+
+Route.latent
+-> Anima Flow Corrective Sampler.latent_image
+```
+
+Workflow for a conditioning-only ControlNet:
+
+```text
+Route.control_image + Route.mask
+-> ControlNet apply -> positive/negative conditioning
+
+Checkpoint MODEL + Route.reference_latent
+-> Anima Cosmos Reference Latent
+-> Anima Flow Corrective Sampler.model
+
+Route.latent
+-> Anima Flow Corrective Sampler.latent_image
+```
+
+Keep `control_fill: masked black` for Anima LLLite inpaint weights. The LLLite
+inpaint model was trained with masked RGB plus a binary mask as 4-channel
+conditioning, so this route outputs both `control_image` and `mask`.
+
 ### Anima Inpaint Latent Prepare
 
-Use this first when you want normal ComfyUI masked repaint without ControlNet.
-It is a front-end node for `Anima Flow Corrective Sampler`.
+Use this lower-level node when you only want a sampler-ready masked latent.
+For the full no-ControlNet time-reference workflow, prefer Route A.
 
 Typical workflow:
 
@@ -112,14 +195,15 @@ kohya-ss published Anima LLLite inpaint weights using 4-channel conditioning
 - https://huggingface.co/kohya-ss/Anima-LLLite
 - https://github.com/kohya-ss/ComfyUI-Anima-LLLite
 
-Use `control_image` and the processed `mask` from `Anima Cosmos Repaint Prepare`
-as inputs to that node. This route is the better candidate when the masked
-region must be regenerated structurally, because the model has learned an
-explicit inpaint condition.
+Use `control_image` and the processed `mask` from
+`Anima T-Reference Control Repaint Route` or `Anima Cosmos Repaint Prepare` as
+inputs to that node. This route is the better candidate when the masked region
+must be regenerated structurally, because the model has learned an explicit
+inpaint condition.
 
 ## Decision Rule
 
-Use no-ControlNet reference latent first for small edits and local cleanup:
+Use Route A first for small edits and local cleanup:
 
 ```text
 target: preserve original identity, color, style, pose
@@ -127,7 +211,7 @@ mask: small to medium
 denoise: 0.18-0.35
 ```
 
-Use LLLite/ControlNet inpaint when structure is actually wrong:
+Use Route B with LLLite/ControlNet inpaint when structure is actually wrong:
 
 ```text
 target: rebuild hands, fingers, clothing, local objects
@@ -139,8 +223,8 @@ For upscale cleanup, run a paired test before promoting a default:
 
 ```text
 A: Repaint Prepare + noise_mask only
-B: Repaint Prepare + Reference Latent
-C: Repaint Prepare + LLLite inpaint
+B: Route A, time-axis reference only
+C: Route B, time-axis reference + LLLite inpaint
 ```
 
 Keep seed, prompt, sampler, steps, cfg, resolution, and mask fixed. Score

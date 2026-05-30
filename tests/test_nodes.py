@@ -12,6 +12,8 @@ from anima_sampler.nodes import (
     AnimaFlowCorrectiveSampler,
     AnimaFlowSettings,
     AnimaInpaintLatentPrepare,
+    AnimaTReferenceControlRepaintRoute,
+    AnimaTReferenceRepaintRoute,
     NODE_CATEGORY,
     NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS,
@@ -31,6 +33,8 @@ class NodeRegistrationTests(unittest.TestCase):
                 "AnimaFlowSettings": AnimaFlowSettings,
                 "AnimaFlowCorrectiveSampler": AnimaFlowCorrectiveSampler,
                 "AnimaInpaintLatentPrepare": AnimaInpaintLatentPrepare,
+                "AnimaTReferenceRepaintRoute": AnimaTReferenceRepaintRoute,
+                "AnimaTReferenceControlRepaintRoute": AnimaTReferenceControlRepaintRoute,
                 "AnimaCosmosRepaintPrepare": AnimaCosmosRepaintPrepare,
                 "AnimaCosmosReferenceModelPatch": AnimaCosmosReferenceModelPatch,
                 "AnimaCosmosReferenceLatent": AnimaCosmosReferenceLatent,
@@ -42,6 +46,8 @@ class NodeRegistrationTests(unittest.TestCase):
                 "AnimaFlowSettings": "Anima Flow Settings",
                 "AnimaFlowCorrectiveSampler": "Anima Flow Corrective Sampler",
                 "AnimaInpaintLatentPrepare": "Anima Inpaint Latent Prepare",
+                "AnimaTReferenceRepaintRoute": "Anima T-Reference Repaint Route",
+                "AnimaTReferenceControlRepaintRoute": "Anima T-Reference Control Repaint Route",
                 "AnimaCosmosRepaintPrepare": "Anima Cosmos Repaint Prepare",
                 "AnimaCosmosReferenceModelPatch": "Anima Cosmos Reference Model Patch",
                 "AnimaCosmosReferenceLatent": "Anima Cosmos Reference Latent",
@@ -520,6 +526,88 @@ class NodeRegistrationTests(unittest.TestCase):
 
         self.assertAlmostEqual(float(vae.encoded_image[:, 1:3, 1:3].mean()), 0.5)
 
+    def test_t_reference_repaint_route_builds_patched_model_and_latent(self):
+        image = torch.ones(1, 8, 8, 3)
+        mask = torch.zeros(1, 8, 8)
+        mask[:, 2:6, 2:6] = 1.0
+        reference_samples = torch.full((1, 16, 2, 2), 2.0)
+        latent_samples = torch.zeros(1, 16, 2, 2)
+        vae = _SequenceEncodeVAE([reference_samples, latent_samples])
+        model = _DummyModelPatcher()
+
+        patched, latent, out_mask, preview, log = AnimaTReferenceRepaintRoute().build(
+            model=model,
+            image=image,
+            mask=mask,
+            vae=vae,
+            mode="structure repaint",
+            mask_threshold=0.5,
+            mask_grow=0,
+            mask_feather=0,
+            latent_fill="original",
+            noise_seed=1,
+            invert_mask=False,
+        )
+
+        self.assertIsNot(patched, model)
+        self.assertIs(latent["samples"], latent_samples)
+        self.assertEqual(len(patched.model_options["anima_ref_latents"]), 1)
+        self.assertIs(patched.model_options["anima_ref_latents"][0], reference_samples)
+        self.assertEqual(tuple(out_mask.shape), (1, 8, 8))
+        self.assertEqual(tuple(preview.shape), (1, 8, 8, 3))
+        self.assertIn("no-controlnet t-reference repaint", log)
+        self.assertIn("connect_model: route.model", log)
+
+    def test_t_reference_control_route_outputs_reference_control_and_latent(self):
+        image = torch.ones(1, 8, 8, 3)
+        mask = torch.zeros(1, 8, 8)
+        mask[:, 2:6, 2:6] = 1.0
+        reference_samples = torch.full((1, 16, 2, 2), 2.0)
+        latent_samples = torch.zeros(1, 16, 2, 2)
+        vae = _SequenceEncodeVAE([reference_samples, latent_samples])
+
+        reference_latent, latent, control, out_mask, preview, log = (
+            AnimaTReferenceControlRepaintRoute().prepare(
+                image=image,
+                mask=mask,
+                vae=vae,
+                mode="structure repaint",
+                mask_threshold=0.5,
+                mask_grow=0,
+                mask_feather=0,
+                latent_fill="original",
+                noise_seed=1,
+                control_fill="masked black",
+                invert_mask=False,
+            )
+        )
+
+        self.assertIs(reference_latent["samples"], reference_samples)
+        self.assertIs(latent["samples"], latent_samples)
+        self.assertEqual(tuple(control.shape), (1, 8, 8, 3))
+        self.assertEqual(tuple(out_mask.shape), (1, 8, 8))
+        self.assertEqual(tuple(preview.shape), (1, 8, 8, 3))
+        self.assertLess(float(control[:, 2:6, 2:6].max()), 1.0)
+        self.assertIn("external ControlNet/LLLite", log)
+        self.assertIn("connect_reference: reference_latent", log)
+
+    def test_control_route_has_no_model_input_to_avoid_controlnet_cycles(self):
+        inputs = AnimaTReferenceControlRepaintRoute.INPUT_TYPES()["required"]
+
+        self.assertNotIn("model", inputs)
+        self.assertIn("control_fill", inputs)
+        self.assertEqual(
+            AnimaTReferenceControlRepaintRoute.RETURN_NAMES,
+            (
+                "reference_latent",
+                "latent",
+                "control_image",
+                "mask",
+                "mask_preview",
+                "log",
+            ),
+        )
+
     def test_reference_latent_patches_model_and_appends_time_frames(self):
         model = _DummyModelPatcher()
         reference = torch.full((1, 16, 1, 2, 2), 2.0)
@@ -576,6 +664,18 @@ class _DummyEncodeVAE:
     def encode(self, image):
         self.encoded_image = image
         return self.samples
+
+
+class _SequenceEncodeVAE:
+    def __init__(self, samples):
+        self.samples = list(samples)
+        self.encoded_images = []
+
+    def encode(self, image):
+        self.encoded_images.append(image)
+        if not self.samples:
+            raise AssertionError("VAE encode called more times than expected")
+        return self.samples.pop(0)
 
 
 class _DummyInnerModel:

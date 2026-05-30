@@ -1,9 +1,12 @@
-# ComfyUI Anima Flow Corrective Sampler
+# Anima Sampler for ComfyUI
 
-Custom ComfyUI sampler nodes for Anima / Cosmos-style rectified-flow image
-models. It packages a Cosmos-aligned RF linear shift schedule with UniPC and
-PC3 solver options for stronger structure, spatial consistency, and detail
-retention in ComfyUI.
+Drop-in ComfyUI sampler nodes for
+[Anima](https://huggingface.co/circlestone-labs/Anima). The goal is to make
+complex Anima prompts easier to keep coherent, especially multi-character
+poses, character-object relationships, spatial composition, and fine detail.
+
+The sampler packages a Cosmos-style rectified-flow path with RF linear shift,
+FlowUniPC, and PC3 solver options behind a small daily-use node surface.
 
 This is an independent implementation, not an official NVIDIA or CircleStone
 Labs release. The design is aligned with public Cosmos / Cosmos Predict2.5
@@ -23,6 +26,19 @@ cfg_mode      = const
 
 The goal is to improve prompt structure, spatial relationships, and detail
 stability while keeping the node surface small enough for daily use.
+
+## When to Try This
+
+Try this sampler if you already use Anima in ComfyUI and run into any of these:
+
+- complex prompts lose the intended subject layout;
+- two-character poses collapse into unclear body or hand relationships;
+- objects drift away from the character that should hold or interact with them;
+- normal sampler / scheduler search takes too much trial and error.
+
+If you only need a fast, simple first Anima run, start with the official Anima
+model card settings first. This node is for users who want a stronger
+composition-focused default and a controlled A/B path against native samplers.
 
 ## Example Output
 

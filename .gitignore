@@ -31,7 +31,10 @@ temp/
 
 # Local reference material and scratch notes
 user_input/
-docs/
+docs/*
+marketingwiki/
+marketing-wiki/
+docs/marketing-wiki/
 cosmos-predict2/
 cosmos-predict2.5/
 AGENT.md

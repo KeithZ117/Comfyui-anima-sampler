@@ -15,6 +15,7 @@ from .flow_constants import (
 from .node_constants import NODE_CATEGORY
 from .reference import AnimaCosmosReferenceLatent, AnimaCosmosReferenceModelPatch
 from .repaint import AnimaCosmosRepaintPrepare, AnimaInpaintLatentPrepare
+from .repaint_routes import AnimaTReferenceControlRepaintRoute, AnimaTReferenceRepaintRoute
 
 ANIMA_FLOW_SETTINGS = "ANIMA_FLOW_SETTINGS"
 DEFAULT_FLOW_SCHEDULE = "flow_rf_linear_shift"
@@ -574,6 +575,8 @@ NODE_CLASS_MAPPINGS = {
     "AnimaFlowSettings": AnimaFlowSettings,
     "AnimaFlowCorrectiveSampler": AnimaFlowCorrectiveSampler,
     "AnimaInpaintLatentPrepare": AnimaInpaintLatentPrepare,
+    "AnimaTReferenceRepaintRoute": AnimaTReferenceRepaintRoute,
+    "AnimaTReferenceControlRepaintRoute": AnimaTReferenceControlRepaintRoute,
     "AnimaCosmosRepaintPrepare": AnimaCosmosRepaintPrepare,
     "AnimaCosmosReferenceModelPatch": AnimaCosmosReferenceModelPatch,
     "AnimaCosmosReferenceLatent": AnimaCosmosReferenceLatent,
@@ -583,6 +586,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AnimaFlowSettings": "Anima Flow Settings",
     "AnimaFlowCorrectiveSampler": "Anima Flow Corrective Sampler",
     "AnimaInpaintLatentPrepare": "Anima Inpaint Latent Prepare",
+    "AnimaTReferenceRepaintRoute": "Anima T-Reference Repaint Route",
+    "AnimaTReferenceControlRepaintRoute": "Anima T-Reference Control Repaint Route",
     "AnimaCosmosRepaintPrepare": "Anima Cosmos Repaint Prepare",
     "AnimaCosmosReferenceModelPatch": "Anima Cosmos Reference Model Patch",
     "AnimaCosmosReferenceLatent": "Anima Cosmos Reference Latent",
