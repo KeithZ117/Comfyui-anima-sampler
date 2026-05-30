@@ -6,7 +6,7 @@ import math
 import re
 from typing import Any, Iterable
 
-from .flow_sampler import (
+from .flow_constants import (
     CFG_SCHEDULE_MODES,
     FLOW_SCHEDULES,
     FLOW_SOLVERS,

@@ -27,7 +27,7 @@ from .scheduler import (
     build_simple_sigmas,
     early_dense_simple_scheduler,
 )
-from .flow_sampler import CFG_SCHEDULE_DOMAINS, CFG_SCHEDULE_MODES
+from .flow_constants import CFG_SCHEDULE_DOMAINS, CFG_SCHEDULE_MODES
 
 __all__ = [
     "PhaseSteps",

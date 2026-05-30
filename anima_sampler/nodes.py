@@ -5,16 +5,20 @@ from __future__ import annotations
 import math
 
 from .experiment import build_labeled_comparison_grid
-from .flow_sampler import (
-    CFG_SCHEDULE_MODES,
-    FLOW_SCHEDULES,
-    FLOW_SOLVERS,
+from .comfy_runner import (
     run_comfy_anima_sampler,
     run_comfy_native_sampler,
 )
+from .flow_constants import (
+    CFG_SCHEDULE_MODES,
+    FLOW_SCHEDULES,
+    FLOW_SOLVERS,
+)
+from .node_constants import NODE_CATEGORY
+from .reference import AnimaCosmosReferenceLatent, AnimaCosmosReferenceModelPatch
+from .repaint import AnimaCosmosRepaintPrepare
 
 ANIMA_FLOW_SETTINGS = "ANIMA_FLOW_SETTINGS"
-NODE_CATEGORY = "anima sampler"
 DEFAULT_FLOW_SCHEDULE = "flow_rf_linear_shift"
 DEFAULT_PUBLIC_CFG_MODE = "const"
 PUBLIC_CFG_MODES = ["const", "bump cfg", "ramp cfg"]
@@ -791,12 +795,18 @@ NODE_CLASS_MAPPINGS = {
     "AnimaFlowSettings": AnimaFlowSettings,
     "AnimaFlowCorrectiveSampler": AnimaFlowCorrectiveSampler,
     "AnimaFourWayComparison": AnimaFourWayComparison,
+    "AnimaCosmosRepaintPrepare": AnimaCosmosRepaintPrepare,
+    "AnimaCosmosReferenceModelPatch": AnimaCosmosReferenceModelPatch,
+    "AnimaCosmosReferenceLatent": AnimaCosmosReferenceLatent,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AnimaFlowSettings": "Anima Flow Settings",
     "AnimaFlowCorrectiveSampler": "Anima Flow Corrective Sampler",
     "AnimaFourWayComparison": "Anima Four Way Comparison",
+    "AnimaCosmosRepaintPrepare": "Anima Cosmos Repaint Prepare",
+    "AnimaCosmosReferenceModelPatch": "Anima Cosmos Reference Model Patch",
+    "AnimaCosmosReferenceLatent": "Anima Cosmos Reference Latent",
 }
 
 

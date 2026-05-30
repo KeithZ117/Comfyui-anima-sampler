@@ -6,6 +6,9 @@ import torch
 from anima_sampler.nodes import (
     ANIMA_FLOW_BASELINE,
     ANIMA_FLOW_SETTINGS,
+    AnimaCosmosReferenceLatent,
+    AnimaCosmosReferenceModelPatch,
+    AnimaCosmosRepaintPrepare,
     AnimaFlowCorrectiveSampler,
     AnimaFlowSettings,
     AnimaFourWayComparison,
@@ -28,6 +31,9 @@ class NodeRegistrationTests(unittest.TestCase):
                 "AnimaFlowSettings": AnimaFlowSettings,
                 "AnimaFlowCorrectiveSampler": AnimaFlowCorrectiveSampler,
                 "AnimaFourWayComparison": AnimaFourWayComparison,
+                "AnimaCosmosRepaintPrepare": AnimaCosmosRepaintPrepare,
+                "AnimaCosmosReferenceModelPatch": AnimaCosmosReferenceModelPatch,
+                "AnimaCosmosReferenceLatent": AnimaCosmosReferenceLatent,
             },
         )
         self.assertEqual(
@@ -36,6 +42,9 @@ class NodeRegistrationTests(unittest.TestCase):
                 "AnimaFlowSettings": "Anima Flow Settings",
                 "AnimaFlowCorrectiveSampler": "Anima Flow Corrective Sampler",
                 "AnimaFourWayComparison": "Anima Four Way Comparison",
+                "AnimaCosmosRepaintPrepare": "Anima Cosmos Repaint Prepare",
+                "AnimaCosmosReferenceModelPatch": "Anima Cosmos Reference Model Patch",
+                "AnimaCosmosReferenceLatent": "Anima Cosmos Reference Latent",
             },
         )
 
@@ -445,6 +454,91 @@ class NodeRegistrationTests(unittest.TestCase):
         self.assertIn("AnimaFourWayComparison", out[5])
         self.assertIn("profile_b: flow_pc3_damped", out[5])
 
+    def test_repaint_prepare_outputs_latent_noise_mask_and_control_image(self):
+        image = torch.ones(1, 8, 8, 3)
+        mask = torch.zeros(1, 8, 8)
+        mask[:, 3:5, 3:5] = 1.0
+        vae = _DummyEncodeVAE(samples=torch.zeros(1, 16, 2, 2))
+
+        latent, control, out_mask, preview, log = AnimaCosmosRepaintPrepare().prepare(
+            image=image,
+            mask=mask,
+            vae=vae,
+            mode="structure repaint",
+            mask_threshold=0.5,
+            mask_grow=1,
+            mask_feather=1,
+            latent_fill="original",
+            control_fill="masked black",
+            invert_mask=False,
+        )
+
+        self.assertIs(latent["samples"], vae.samples)
+        self.assertEqual(tuple(latent["noise_mask"].shape), (1, 1, 2, 2))
+        self.assertEqual(tuple(control.shape), (1, 8, 8, 3))
+        self.assertEqual(tuple(out_mask.shape), (1, 8, 8))
+        self.assertEqual(tuple(preview.shape), (1, 8, 8, 3))
+        self.assertLess(float(control[:, 3:5, 3:5].max()), 1.0)
+        self.assertIn("recommended_denoise: 0.52", log)
+        self.assertIn("noise_mask_shape: [1, 1, 2, 2]", log)
+
+    def test_repaint_prepare_can_invert_mask_and_fill_latent(self):
+        image = torch.ones(1, 4, 4, 3)
+        mask = torch.ones(1, 4, 4)
+        mask[:, 1:3, 1:3] = 0.0
+        vae = _DummyEncodeVAE(samples=torch.zeros(1, 16, 1, 1))
+
+        AnimaCosmosRepaintPrepare().prepare(
+            image=image,
+            mask=mask,
+            vae=vae,
+            mode="edge repair",
+            mask_threshold=0.5,
+            mask_grow=0,
+            mask_feather=0,
+            latent_fill="neutral gray",
+            control_fill="neutral gray",
+            invert_mask=True,
+        )
+
+        self.assertAlmostEqual(float(vae.encoded_image[:, 1:3, 1:3].mean()), 0.5)
+
+    def test_reference_latent_patches_model_and_appends_time_frames(self):
+        model = _DummyModelPatcher()
+        reference = torch.full((1, 16, 1, 2, 2), 2.0)
+
+        patched, = AnimaCosmosReferenceLatent().apply(
+            model=model,
+            latent={"samples": reference},
+            enabled=True,
+        )
+
+        self.assertIsNot(patched, model)
+        self.assertTrue(patched.model_options["anima_cosmos_reference_patch_installed"])
+        self.assertEqual(len(patched.model_options["anima_ref_latents"]), 1)
+
+        wrapper = patched.model_options["model_function_wrapper"]
+        x = torch.ones(1, 16, 1, 2, 2)
+        out = wrapper(
+            patched.model.apply_model,
+            {"input": x, "timestep": torch.ones(1), "c": {}},
+        )
+
+        self.assertEqual(tuple(out.shape), tuple(x.shape))
+        self.assertEqual(patched.model.last_input_shape, (1, 16, 2, 2, 2))
+
+    def test_reference_latent_disabled_is_pass_through(self):
+        model = _DummyModelPatcher()
+
+        out, = AnimaCosmosReferenceLatent().apply(
+            model=model,
+            latent={"samples": torch.zeros(1, 16, 1, 2, 2)},
+            enabled=False,
+        )
+
+        self.assertIs(out, model)
+        self.assertNotIn("model_function_wrapper", model.model_options)
+
 
 class _DummyVAE:
     def __init__(self, latent_dim=2, image=None):
@@ -455,6 +549,50 @@ class _DummyVAE:
     def decode(self, samples):
         self.samples = samples
         return self.image
+
+
+class _DummyEncodeVAE:
+    def __init__(self, samples):
+        self.samples = samples
+        self.encoded_image = None
+
+    def encode(self, image):
+        self.encoded_image = image
+        return self.samples
+
+
+class _DummyInnerModel:
+    def __init__(self):
+        self.last_input_shape = None
+        self.anima_ref_latents = []
+
+    def extra_conds(self, **kwargs):
+        return {}
+
+    def process_latent_in(self, latent):
+        return latent
+
+    def apply_model(self, x, timestep, **kwargs):
+        self.last_input_shape = tuple(x.shape)
+        return x
+
+
+class _DummyModelPatcher:
+    def __init__(self):
+        self.model = _DummyInnerModel()
+        self.model_options = {}
+
+    def clone(self):
+        clone = _DummyModelPatcher()
+        clone.model = self.model
+        clone.model_options = dict(self.model_options)
+        return clone
+
+    def add_object_patch(self, name, value):
+        setattr(self.model, name, value)
+
+    def set_model_unet_function_wrapper(self, wrapper):
+        self.model_options["model_function_wrapper"] = wrapper
 
 
 if __name__ == "__main__":
