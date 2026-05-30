@@ -86,6 +86,9 @@ For AnimaEdit-style image editing, load an AnimaEdit LoRA before
 `Anima T-Reference Edit Route`, then feed its `model` and `latent` outputs to a
 native KSampler. The discussion workflow that motivated this path uses
 `er_sde`, `simple`, `22` steps, `cfg 3.4`, and `denoise 1.0`.
+The importable template is
+[`example_workflows/anima_t_reference_edit_route.json`](example_workflows/anima_t_reference_edit_route.json),
+which ComfyUI exposes from the custom node template browser after install.
 
 For masked repainting, use `neutral gray` latent/reference fill as the starting
 point and keep denoise high for real redraws. Low denoise values deliberately
