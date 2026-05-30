@@ -78,9 +78,8 @@ def _patch_cosmos_reference_model(model):
 
         def custom_extra_conds(self, **kwargs):
             out = original_extra_conds(**kwargs)
-            ref_latents = kwargs.get("reference_latents", None)
-            if ref_latents is not None:
-                refs = ref_latents if isinstance(ref_latents, (list, tuple)) else [ref_latents]
+            refs = _reference_latent_items(kwargs.get("reference_latents", None))
+            if refs:
                 refs = [_process_reference_latent(self, ref) for ref in refs]
                 out["ref_latents"] = _cond_list(refs)
             return out
@@ -114,26 +113,27 @@ def _patch_cosmos_reference_model(model):
 def _collect_reference_latents(model_apply, model_kwargs):
     cond = model_kwargs.get("c", {}) or {}
     refs = []
-    from_cond = cond.get("ref_latents", [])
-    if from_cond is not None:
-        if _is_reference_latent_sequence(from_cond):
-            refs.extend(list(from_cond))
-        else:
-            refs.append(from_cond)
+    refs.extend(_reference_latent_items(cond.get("ref_latents", None)))
     model_obj = getattr(model_apply, "__self__", None)
     refs.extend(list(getattr(model_obj, "anima_ref_latents", [])))
     return refs
 
 
-def _is_reference_latent_sequence(value):
+def _reference_latent_items(value):
+    if value is None:
+        return []
     if isinstance(value, (list, tuple)):
-        return True
+        return list(value)
     try:
         import comfy.conds
 
-        return isinstance(value, comfy.conds.CONDList)
+        if isinstance(value, comfy.conds.CONDList):
+            return list(value.cond)
     except Exception:
-        return False
+        pass
+    if hasattr(value, "cond") and isinstance(value.cond, (list, tuple)):
+        return list(value.cond)
+    return [value]
 
 
 def _append_reference_latents(x, refs):

@@ -764,10 +764,7 @@ class NodeRegistrationTests(unittest.TestCase):
     def test_reference_patch_accepts_comfy_cond_list_references(self):
         class FakeCONDList:
             def __init__(self, items):
-                self.items = list(items)
-
-            def __iter__(self):
-                return iter(self.items)
+                self.cond = list(items)
 
         comfy_module = types.ModuleType("comfy")
         conds_module = types.ModuleType("comfy.conds")
@@ -801,6 +798,28 @@ class NodeRegistrationTests(unittest.TestCase):
                 sys.modules.pop("comfy.conds", None)
             else:
                 sys.modules["comfy.conds"] = previous_conds
+
+        self.assertEqual(patched.model.last_input_shape, (1, 16, 2, 2, 2))
+
+    def test_reference_patch_accepts_cond_object_with_list_payload(self):
+        class CondObject:
+            def __init__(self, items):
+                self.cond = list(items)
+
+        model = _DummyModelPatcher()
+        patched, = AnimaCosmosReferenceModelPatch().patch(model)
+        wrapper = patched.model_options["model_function_wrapper"]
+        x = torch.ones(1, 16, 1, 2, 2)
+        reference = torch.full((1, 16, 1, 2, 2), 2.0)
+
+        wrapper(
+            patched.model.apply_model,
+            {
+                "input": x,
+                "timestep": torch.ones(1),
+                "c": {"ref_latents": CondObject([reference])},
+            },
+        )
 
         self.assertEqual(patched.model.last_input_shape, (1, 16, 2, 2, 2))
 
