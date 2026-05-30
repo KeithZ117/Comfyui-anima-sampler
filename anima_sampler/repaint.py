@@ -188,6 +188,7 @@ class AnimaCosmosRepaintPrepare:
                 f"noise_mask_shape: {_shape_text(noise_mask)}",
                 "fill_mask: hard grown mask is used for latent/control/reference fill",
                 "noise_mask: hard grown mask; white/1.0 is repaint area; black/0.0 is keep area",
+                "output_mask: hard grown mask for ControlNet/LLLite mask inputs",
                 "composite_mask: feathered mask is kept for preview/output compositing only",
                 "mask_threshold: 0 selects any nonzero mask; higher values require mask >= threshold",
                 (
@@ -196,7 +197,7 @@ class AnimaCosmosRepaintPrepare:
                 ),
             ]
         )
-        return latent, control_image, soft_mask, mask_preview, log
+        return latent, control_image, sample_mask, mask_preview, log
 
 
 def _encode_latent_image(vae, image):

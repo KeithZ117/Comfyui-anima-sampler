@@ -93,6 +93,8 @@ which ComfyUI exposes from the custom node template browser after install.
 For masked repainting, use `neutral gray` latent/reference fill as the starting
 point and keep denoise high for real redraws. Low denoise values deliberately
 preserve the original image and will look like the mask did not repaint.
+`mask_feather` is only used for preview/final compositing; the emitted mask and
+reference/control fills stay hard so soft edges are not fed back into the model.
 
 `ramp cfg` starts guidance low and smoothly raises it to the selected `cfg`.
 With the default `cfg=7`, it starts near `4.5`, keeps that low guidance through

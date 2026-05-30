@@ -431,7 +431,7 @@ class NodeRegistrationTests(unittest.TestCase):
         mask[:, 3, 3] = 1.0
         vae = _DummyEncodeVAE(samples=torch.zeros(1, 16, 2, 2))
 
-        _latent, control, out_mask, _preview, _log = AnimaCosmosRepaintPrepare().prepare(
+        latent, control, out_mask, _preview, _log = AnimaCosmosRepaintPrepare().prepare(
             image=image,
             mask=mask,
             vae=vae,
@@ -446,7 +446,8 @@ class NodeRegistrationTests(unittest.TestCase):
         )
 
         self.assertEqual(float(out_mask[0, 3, 3]), 1.0)
-        self.assertGreater(float(out_mask[0, 3, 4]), 0.0)
+        self.assertEqual(float(out_mask[0, 3, 4]), 0.0)
+        self.assertGreater(float(latent["anima_repaint_mask"][0, 3, 4]), 0.0)
         self.assertEqual(float(control[0, 3, 4, 0]), 1.0)
 
     def test_inpaint_latent_prepare_exposes_image_mask_workflow(self):
@@ -465,7 +466,7 @@ class NodeRegistrationTests(unittest.TestCase):
             ("LATENT", "MASK", "IMAGE", "STRING"),
         )
 
-    def test_repaint_prepare_uses_hard_sample_mask_and_soft_output_mask(self):
+    def test_repaint_prepare_uses_hard_sample_mask_and_soft_composite_mask(self):
         image = torch.ones(1, 7, 7, 3)
         mask = torch.zeros(1, 7, 7)
         mask[:, 3, 3] = 1.0
@@ -487,10 +488,12 @@ class NodeRegistrationTests(unittest.TestCase):
 
         self.assertEqual(float(latent["noise_mask"][0, 0, 3, 3]), 1.0)
         self.assertEqual(float(latent["noise_mask"][0, 0, 3, 4]), 0.0)
-        self.assertGreater(float(out_mask[0, 3, 4]), 0.0)
+        self.assertEqual(float(out_mask[0, 3, 4]), 0.0)
+        self.assertGreater(float(latent["anima_repaint_mask"][0, 3, 4]), 0.0)
         self.assertEqual(float(vae.encoded_image[0, 3, 4, 0]), 1.0)
         self.assertAlmostEqual(float(vae.encoded_image[0, 3, 3, 0]), 0.5)
         self.assertIn("hard grown mask", log)
+        self.assertIn("output_mask: hard grown mask", log)
 
     def test_inpaint_latent_prepare_outputs_sampler_ready_latent(self):
         image = torch.ones(1, 8, 8, 3)
@@ -707,6 +710,43 @@ class NodeRegistrationTests(unittest.TestCase):
         self.assertIn("reference_masking", log)
         self.assertIn("reference_fill: neutral gray", log)
         self.assertIn("connect_reference: reference_latent", log)
+
+    def test_t_reference_control_route_uses_hard_mask_for_reference_fill(self):
+        image = torch.ones(1, 7, 7, 3)
+        mask = torch.zeros(1, 7, 7)
+        mask[:, 3, 3] = 1.0
+        reference_samples = torch.full((1, 16, 2, 2), 2.0)
+        latent_samples = torch.zeros(1, 16, 2, 2)
+        vae = _SequenceEncodeVAE([latent_samples, reference_samples])
+
+        reference_latent, latent, control, out_mask, _preview, _log = (
+            AnimaTReferenceControlRepaintRoute().prepare(
+                image=image,
+                mask=mask,
+                vae=vae,
+                mode="edge repair",
+                mask_threshold=0.5,
+                mask_grow=0,
+                mask_feather=2,
+                latent_fill="original",
+                noise_seed=1,
+                control_fill="masked black",
+                reference_fill="neutral gray",
+                invert_mask=False,
+            )
+        )
+
+        self.assertIs(reference_latent["samples"], reference_samples)
+        self.assertIs(latent["samples"], latent_samples)
+        self.assertEqual(float(out_mask[0, 3, 3]), 1.0)
+        self.assertEqual(float(out_mask[0, 3, 4]), 0.0)
+        self.assertGreater(float(latent["anima_repaint_mask"][0, 3, 4]), 0.0)
+        self.assertEqual(float(control[0, 3, 3, 0]), 0.0)
+        self.assertEqual(float(control[0, 3, 4, 0]), 1.0)
+
+        reference_pixels = vae.encoded_images[1]
+        self.assertAlmostEqual(float(reference_pixels[0, 3, 3, 0]), 0.5)
+        self.assertEqual(float(reference_pixels[0, 3, 4, 0]), 1.0)
 
     def test_control_route_has_no_model_input_to_avoid_controlnet_cycles(self):
         inputs = AnimaTReferenceControlRepaintRoute.INPUT_TYPES()["required"]

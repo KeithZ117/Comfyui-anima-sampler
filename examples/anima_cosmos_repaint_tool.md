@@ -133,9 +133,9 @@ conditioning, so this route outputs both `control_image` and `mask`.
 
 For the final image output, connect the same VAE to
 `Anima Flow Corrective Sampler.vae` and use the sampler's `image` output. Repaint
-latents carry the original image and processed mask so the sampler composites
-the decoded repaint back over the source image; this avoids showing the full
-VAE-decoded source and reduces visible seams outside the mask.
+latents carry the original image and a feathered composite mask so the sampler
+composites the decoded repaint back over the source image; this avoids showing
+the full VAE-decoded source and reduces visible seams outside the mask.
 
 ### Anima Inpaint Latent Prepare
 
@@ -193,7 +193,8 @@ Inputs:
 - `mask_threshold`: `0` selects any nonzero mask pixel; higher values require
   mask opacity greater than or equal to the threshold.
 - `mask_grow` / `mask_feather`: expand the sampler repaint region, then soften
-  only the preview/final composite edge.
+  only the preview/final composite edge. The output `mask` remains hard for
+  ControlNet/LLLite mask inputs.
 - `latent_fill`: how the sampler latent is initialized inside the mask.
 - `noise_seed`: deterministic seed for `latent_fill: latent noise`.
 - `control_fill`: how the control/reference image is initialized inside the mask.
@@ -202,7 +203,7 @@ Outputs:
 
 - `latent`: encoded latent with a hard grown `noise_mask` already attached.
 - `control_image`: masked image for Anima LLLite or reference workflows.
-- `mask`: processed soft mask for preview/control/composite.
+- `mask`: hard grown mask for ControlNet/LLLite mask inputs.
 - `mask_preview`: red overlay preview.
 - `log`: recommended sampler settings for the selected mode.
 
